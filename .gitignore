@@ -1,0 +1,22 @@
+# Secrets
+.env
+
+# Data (exports, caches, downloaded KB/images, etc.)
+data/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/

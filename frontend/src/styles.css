@@ -1,0 +1,119 @@
+:root {
+  --bg: #f6f7fb;
+  --card: #ffffff;
+  --text: #111827;
+  --muted: #6b7280;
+  --border: #e5e7eb;
+  --blue: #2563eb;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; background: var(--bg); color: var(--text); }
+
+.topbar {
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+  background: #fff;
+}
+.brand { font-weight: 700; }
+.btn {
+  border: 1px solid var(--border);
+  background: #fff;
+  padding: 8px 12px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+.btn.primary { background: var(--blue); color: #fff; border-color: var(--blue); }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+
+.layout {
+  display: grid;
+  grid-template-columns: 280px 1fr 420px;
+  gap: 12px;
+  padding: 12px;
+  height: calc(100vh - 56px);
+}
+.layout.noCanvas {
+  grid-template-columns: 280px 1fr;
+}
+.layout.withCanvas {
+  grid-template-columns: 280px 1fr 420px;
+}
+.panel { background: var(--card); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; }
+.panel h3 { margin: 0; padding: 12px 12px; border-bottom: 1px solid var(--border); font-size: 14px; color: #111; }
+.list { padding: 10px; overflow: auto; }
+.item { padding: 10px; border: 1px solid var(--border); border-radius: 12px; margin-bottom: 10px; cursor: pointer; background: #fff; }
+.item.active { border-color: var(--blue); }
+.muted { color: var(--muted); font-size: 12px; }
+.badge { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; padding: 4px 10px; border-radius: 999px; font-size: 12px; }
+.unreadDot { position: absolute; top: 12px; right: 12px; width: 8px; height: 8px; border-radius: 999px; background: #ef4444; }
+
+.canvas { padding: 12px; overflow: auto; flex: 1; }
+.canvas textarea { width: 100%; min-height: 240px; resize: vertical; padding: 12px; border-radius: 12px; border: 1px solid var(--border); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+
+.chat { padding: 12px; overflow: auto; flex: 1; }
+.msg { border: 1px solid var(--border); border-radius: 12px; padding: 10px; margin-bottom: 10px; background: #fff; }
+.msg .meta { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.inputbar { border-top: 1px solid var(--border); padding: 10px; background: #fff; }
+.inputbar textarea { width: 100%; min-height: 80px; resize: vertical; padding: 10px; border-radius: 12px; border: 1px solid var(--border); }
+.row { display: flex; gap: 8px; align-items: center; }
+
+.login {
+  max-width: 820px;
+  margin: 10vh auto;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  overflow: hidden;
+  background: #fff;
+}
+.login .left {
+  padding: 24px;
+  background: linear-gradient(135deg, #2563eb, #1d4ed8);
+  color: #fff;
+}
+.login .right { padding: 24px; }
+.field { margin-bottom: 12px; }
+.field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.field input, .field textarea {
+  width: 100%;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+}
+.error { color: #b91c1c; font-size: 12px; white-space: pre-wrap; }
+
+.modalBackdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(17, 24, 39, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 50;
+}
+.modalCard {
+  width: min(920px, 100%);
+  max-height: 85vh;
+  overflow: auto;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: 0 20px 60px rgba(0,0,0,.15);
+}
+.modalHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.modalBody { padding: 14px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.hr { height: 1px; background: var(--border); margin: 14px 0; }
