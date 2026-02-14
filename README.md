@@ -84,26 +84,95 @@ TeamMember 是一个面向“团队成员协作 + 知识融合 + 记忆与画像
 ## 架构图（Mermaid）
 
 ```mermaid
+
 flowchart LR
-  subgraph Browser[Web 浏览器]
-    UI[React 前端\nChat + Canvas + Settings]
+  %% TeamMember V1 - System Architecture
+
+  subgraph Client["Client (Browser)"]
+    UI["React/Vite Web UI<br/>Threads • Chat • (Optional) Canvas • Admin"]
   end
 
-  subgraph Docker[Docker Compose]
-    Nginx[Nginx 静态站点 + /api 反代]
-    API[FastAPI Backend]
-    PG[(PostgreSQL\n用户/会话/对话/共享/画像)]
-    QD[(Qdrant\n知识点 Seeds + 用户记忆)]
+  subgraph Edge["Edge / Reverse Proxy (Docker Compose)"]
+    Nginx["Nginx (serves UI + /api reverse proxy)"]
   end
 
-  subgraph Cloud[云端模型]
-    Ark[火山方舟 Ark\nDeepSeek Chat]
-    Dash[阿里 DashScope\nEmbedding + Qwen-VL]
+  subgraph Backend["Backend (FastAPI)"]
+    API["HTTP API<br/>Auth • Threads • Chat(Stream) • Admin Config • Teaching Review"]
+    Router["Intent Router / Complexity Judge<br/>RAG: auto/force-on/force-off"]
+    Gen["LLM Generation (Ark/DeepSeek)<br/>Answer • Rewrite • Clarify Questions"]
+    Rag["RAG Orchestrator<br/>Retrieve • (Optional) Rerank • Self-check"]
+    Chunker["Semantic Chunking (LLM)<br/>Knowledge -> knowledge-point seeds"]
+    Memory["Memory Service<br/>Conversation Memory • Persona"]
+    Decision["Decision Profile Builder<br/>Risk bias • Evidence threshold"]
+    TState["Thread Semantic State<br/>Open loops • Topic entropy"]
+    Vision["Image Understanding (Qwen-VL)<br/>Screenshot -> structured JSON"]
+    Embed["Embedding (DashScope)<br/>text-embedding-v2 (1536d)"]
+    Notify["Webhook Notifier (optional)<br/>POST to Power Automate"]
   end
 
-  UI --> Nginx --> API
-  API --> PG
-  API --> QD
-  API --> Ark
-  API --> Dash
+  subgraph Storage["Storage"]
+    PG["PostgreSQL<br/>users • threads • chat_messages<br/>thread_state • user_decision_profile<br/>app_config • teaching_queue/..."]
+    Qdrant["Qdrant Vector DB<br/>seeds + metadata + vectors"]
+    Files["Local Files / Cache<br/>uploaded images • temp exports"]
+  end
+
+  subgraph External["External Services"]
+    Ark["Volcengine Ark (OpenAI-compatible)<br/>DeepSeek model"]
+    DashScope["DashScope (Alibaba)<br/>Embedding + Qwen-VL"]
+    Sources["Data Sources<br/>SQL • OData • Manual Paste"]
+  end
+
+  %% Client -> Edge -> Backend
+  UI -->|HTTPS| Nginx
+  Nginx -->|/api/*| API
+
+  %% Backend internal calls
+  API --> Router
+  Router -->|need clarifying?| Gen
+  Router -->|RAG needed| Rag
+  Rag --> Embed
+  Rag --> Qdrant
+  Rag -->|optional rerank| Gen
+  Rag -->|final synthesis + self-check| Gen
+
+  API --> Memory
+  API --> Decision
+  API --> TState
+  API --> Vision
+
+  %% Background refresh pipelines
+  API -. after messages .-> TState
+  API -. periodic/throttled .-> Decision
+
+  %% LLM providers
+  Gen --> Ark
+  Chunker --> Ark
+  Decision --> Ark
+  TState --> Ark
+  Embed --> DashScope
+  Vision --> DashScope
+
+  %% Storage
+  API <--> PG
+  Memory <--> PG
+  Decision <--> PG
+  TState <--> PG
+
+  %% Knowledge ingestion
+  Sources --> API
+  API --> Chunker
+  Chunker --> Embed
+  Embed --> Qdrant
+  API --> Qdrant
+  API --> Files
+
+  %% Teaching feedback loop
+  UI -->|Teaching Me submit| API
+  API -->|enqueue for admin review| PG
+  API -->|"boosted retrieval (source_kind=teaching)"| Qdrant
+  API -. optional .-> Notify
+
+  %% Admin runtime config
+  UI -->|Admin: read/write config| API
+  API <--> PG
 ```
