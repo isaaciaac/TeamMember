@@ -6,11 +6,12 @@ import uuid
 from datetime import datetime, time, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from zoneinfo import ZoneInfo
 
+from .audit import append_audit_log
 from .ark import ArkClient
 from .auth import create_access_token, get_current_user, hash_password, require_admin, verify_password
 from .config import (
@@ -38,6 +39,7 @@ from .config import (
 )
 from .db import (
     AppConfig,
+    AuditLog,
     ChatMessage,
     DataSource,
     KnowledgeReview,
@@ -59,7 +61,7 @@ from .rag import decide_rag, retrieve_knowledge
 from .settings import settings
 from .thread_state import background_refresh_thread_state, get_thread_state
 from .vectorstore import VectorStore
-from .runtime_config import set_bool, set_value
+from .runtime_config import invalidate_cache
 from .utils import parse_json_object
 
 
@@ -1758,7 +1760,7 @@ def admin_list_knowledge_reviews(status: str = "pending", admin: User = Depends(
 
 
 @router.post("/admin/knowledge/reviews/{review_id}/approve")
-def admin_approve_knowledge_review(review_id: str, admin: User = Depends(require_admin)) -> dict[str, Any]:
+def admin_approve_knowledge_review(review_id: str, request: Request, admin: User = Depends(require_admin)) -> dict[str, Any]:
     rid = str(review_id or "").strip()
     if not rid:
         raise HTTPException(status_code=400, detail="review_id is required")
@@ -1771,6 +1773,14 @@ def admin_approve_knowledge_review(review_id: str, admin: User = Depends(require
             return {"ok": True, "upserted": int(r.applied_count or 0)}
         if str(r.status or "") != "pending":
             raise HTTPException(status_code=400, detail=f"cannot approve status={r.status}")
+
+        before = {
+            "status": str(r.status or ""),
+            "title": str(r.title or ""),
+            "thread_id": str(r.thread_id or ""),
+            "submitter_user_id": str(r.submitter_user_id or ""),
+            "applied_count": int(r.applied_count or 0),
+        }
 
         pts_raw: Any = []
         try:
@@ -1805,6 +1815,21 @@ def admin_approve_knowledge_review(review_id: str, admin: User = Depends(require
         r.reviewed_at = _utcnow()
         r.applied_count = int(upserted)
         db.add(r)
+        append_audit_log(
+            db,
+            actor=admin,
+            action="admin.knowledge_review.approve",
+            entity_type="knowledge_review",
+            entity_id=str(r.id),
+            before=before,
+            after={
+                "status": str(r.status or ""),
+                "applied_count": int(r.applied_count or 0),
+                "reviewed_by_user_id": str(r.reviewed_by_user_id or ""),
+                "upserted": int(upserted),
+            },
+            request=request,
+        )
         db.commit()
         return {"ok": True, "upserted": upserted}
     finally:
@@ -1816,7 +1841,7 @@ class AdminRejectReviewRequest(BaseModel):
 
 
 @router.post("/admin/knowledge/reviews/{review_id}/reject")
-def admin_reject_knowledge_review(review_id: str, req: AdminRejectReviewRequest, admin: User = Depends(require_admin)) -> dict[str, Any]:
+def admin_reject_knowledge_review(review_id: str, req: AdminRejectReviewRequest, request: Request, admin: User = Depends(require_admin)) -> dict[str, Any]:
     rid = str(review_id or "").strip()
     if not rid:
         raise HTTPException(status_code=400, detail="review_id is required")
@@ -1829,11 +1854,29 @@ def admin_reject_knowledge_review(review_id: str, req: AdminRejectReviewRequest,
             return {"ok": True}
         if str(r.status or "") != "pending":
             raise HTTPException(status_code=400, detail=f"cannot reject status={r.status}")
+        before = {
+            "status": str(r.status or ""),
+            "admin_comment": str(r.admin_comment or ""),
+        }
         r.status = "rejected"
         r.admin_comment = (req.comment or "").strip()[:2000]
         r.reviewed_by_user_id = admin.id
         r.reviewed_at = _utcnow()
         db.add(r)
+        append_audit_log(
+            db,
+            actor=admin,
+            action="admin.knowledge_review.reject",
+            entity_type="knowledge_review",
+            entity_id=str(r.id),
+            before=before,
+            after={
+                "status": str(r.status or ""),
+                "admin_comment": str(r.admin_comment or ""),
+                "reviewed_by_user_id": str(r.reviewed_by_user_id or ""),
+            },
+            request=request,
+        )
         db.commit()
         return {"ok": True}
     finally:
@@ -1870,12 +1913,16 @@ class AdminUpdateUserRequest(BaseModel):
 
 
 @router.put("/admin/users/{user_id}")
-def admin_update_user(user_id: str, req: AdminUpdateUserRequest, admin: User = Depends(require_admin)) -> dict[str, Any]:
+def admin_update_user(user_id: str, req: AdminUpdateUserRequest, request: Request, admin: User = Depends(require_admin)) -> dict[str, Any]:
     db = SessionLocal()
     try:
         row = db.get(User, user_id)
         if not row:
             raise HTTPException(status_code=404, detail="user not found")
+        before = {
+            "is_admin": bool(row.is_admin),
+            "allow_any_topic": bool(getattr(row, "allow_any_topic", False)),
+        }
         if req.is_admin is not None:
             # Prevent locking yourself out
             if row.id == admin.id and req.is_admin is False:
@@ -1883,7 +1930,21 @@ def admin_update_user(user_id: str, req: AdminUpdateUserRequest, admin: User = D
             row.is_admin = bool(req.is_admin)
         if req.allow_any_topic is not None:
             row.allow_any_topic = bool(req.allow_any_topic)
+        after = {
+            "is_admin": bool(row.is_admin),
+            "allow_any_topic": bool(getattr(row, "allow_any_topic", False)),
+        }
         db.add(row)
+        append_audit_log(
+            db,
+            actor=admin,
+            action="admin.user.update",
+            entity_type="user",
+            entity_id=str(row.id),
+            before=before,
+            after=after,
+            request=request,
+        )
         db.commit()
         return {"ok": True}
     finally:
@@ -1932,8 +1993,7 @@ class AdminSetConfigRequest(BaseModel):
 
 
 @router.put("/admin/config")
-def admin_set_config(req: AdminSetConfigRequest, admin: User = Depends(require_admin)) -> dict[str, Any]:
-    _ = admin
+def admin_set_config(req: AdminSetConfigRequest, request: Request, admin: User = Depends(require_admin)) -> dict[str, Any]:
     key = (req.key or "").strip()
     if key not in {
         "rag_policy",
@@ -1960,6 +2020,7 @@ def admin_set_config(req: AdminSetConfigRequest, admin: User = Depends(require_a
     }:
         raise HTTPException(status_code=400, detail="unsupported key")
     val = str(req.value or "")
+    stored = val
     if key in {
         "memory_enabled",
         "topic_guard_enabled",
@@ -1971,14 +2032,91 @@ def admin_set_config(req: AdminSetConfigRequest, admin: User = Depends(require_a
     }:
         v = (val or "").strip().lower()
         if v in {"1", "true", "yes", "y", "on"}:
-            set_bool(key, True)
+            stored = "true"
         elif v in {"0", "false", "no", "n", "off"}:
-            set_bool(key, False)
+            stored = "false"
         else:
             raise HTTPException(status_code=400, detail="invalid boolean")
-        return {"ok": True}
-    set_value(key, val)
+
+    db = SessionLocal()
+    try:
+        row = db.get(AppConfig, key)
+        before_val = str(row.value or "") if row else ""
+        if not row:
+            row = AppConfig(key=key, value="")
+        row.value = stored
+        db.add(row)
+
+        append_audit_log(
+            db,
+            actor=admin,
+            action="admin.config.set",
+            entity_type="app_config",
+            entity_id=key,
+            before={"value": before_val},
+            after={"value": stored},
+            request=request,
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    invalidate_cache()
     return {"ok": True}
+
+
+@router.get("/admin/audit")
+def admin_list_audit(
+    limit: int = 200,
+    before: str = "",
+    actor_user_id: str = "",
+    action_prefix: str = "",
+    admin: User = Depends(require_admin),
+) -> list[dict[str, Any]]:
+    _ = admin
+    lim = max(1, min(1000, int(limit or 200)))
+    before_dt: datetime | None = None
+    if (before or "").strip():
+        try:
+            before_dt = datetime.fromisoformat(before.replace("Z", "+00:00"))
+        except Exception:
+            before_dt = None
+
+    db = SessionLocal()
+    try:
+        q = db.query(AuditLog).order_by(AuditLog.created_at.desc())
+        if before_dt is not None:
+            q = q.filter(AuditLog.created_at < before_dt)
+        if (actor_user_id or "").strip():
+            q = q.filter(AuditLog.actor_user_id == actor_user_id.strip())
+        if (action_prefix or "").strip():
+            q = q.filter(AuditLog.action.like(action_prefix.strip() + "%"))
+        rows = q.limit(lim).all()
+
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            out.append(
+                {
+                    "id": r.id,
+                    "actor_user_id": r.actor_user_id,
+                    "actor_label": r.actor_label,
+                    "action": r.action,
+                    "entity_type": r.entity_type,
+                    "entity_id": r.entity_id,
+                    "request_method": r.request_method,
+                    "request_path": r.request_path,
+                    "request_ip": r.request_ip,
+                    "user_agent": r.user_agent,
+                    "before_json": r.before_json,
+                    "after_json": r.after_json,
+                    "prev_hash": r.prev_hash,
+                    "event_hash": r.event_hash,
+                    "created_at": r.created_at.isoformat(),
+                }
+            )
+        return out
+    finally:
+        db.close()
 
 
 class DataSourceOut(BaseModel):

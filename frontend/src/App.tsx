@@ -32,6 +32,7 @@ export default function App() {
 
   const [adminUsers, setAdminUsers] = useState<api.AdminUser[]>([]);
   const [adminConfig, setAdminConfig] = useState<any>(null);
+  const [adminAudit, setAdminAudit] = useState<api.AdminAuditLog[]>([]);
   const [teachingReviews, setTeachingReviews] = useState<api.AdminTeachingReview[]>([]);
   const [teachingReviewStatus, setTeachingReviewStatus] = useState<"pending" | "approved" | "rejected" | "all">("pending");
   const [cfgRagPolicy, setCfgRagPolicy] = useState("auto");
@@ -434,11 +435,13 @@ export default function App() {
     try {
       const users = await api.adminListUsers();
       const cfg = await api.adminGetConfig();
+      const aud = await api.adminListAudit({ limit: 200 }).catch(() => []);
       const reviews = await api.adminListTeachingReviews(teachingReviewStatus).catch(() => []);
       const ks = await api.knowledgeStats().catch(() => null);
       const ss = await api.listSources().catch(() => []);
       setAdminUsers(users);
       setAdminConfig(cfg);
+      setAdminAudit(aud as any);
       setTeachingReviews(reviews as any);
       setCfgRagPolicy(String(cfg?.effective?.rag_policy || "auto"));
       setCfgRagTopK(String(cfg?.effective?.rag_top_k ?? "10"));
@@ -464,6 +467,16 @@ export default function App() {
       setKstats(ks);
       setSources(ss as any);
       setAdminOpen(true);
+    } catch (e: any) {
+      setError(String(e?.message || e));
+    }
+  }
+
+  async function refreshAudit() {
+    setError("");
+    try {
+      const aud = await api.adminListAudit({ limit: 200 });
+      setAdminAudit(aud);
     } catch (e: any) {
       setError(String(e?.message || e));
     }
@@ -1191,6 +1204,43 @@ export default function App() {
               <div className="msg">
                 <div className="muted">overrides</div>
                 <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(adminConfig?.overrides || {}, null, 2)}</pre>
+              </div>
+
+              <div className="hr" />
+              <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                <div style={{ fontWeight: 700 }}>审计日志（只增不改）</div>
+                <button className="btn" onClick={refreshAudit}>刷新</button>
+              </div>
+              <div className="muted" style={{ marginBottom: 10 }}>
+                记录管理员对系统做的变更操作。应用层不提供修改接口，数据库也禁止 UPDATE/DELETE（append-only）。
+              </div>
+              <div style={{ display: "grid", gap: 8, maxHeight: 280, overflow: "auto" }}>
+                {adminAudit.map((a) => (
+                  <details key={a.id} className="msg" style={{ margin: 0 }}>
+                    <summary style={{ cursor: "pointer" }}>
+                      <span style={{ fontWeight: 700 }}>{a.action}</span>
+                      <span className="muted"> · {a.actor_label} · {new Date(a.created_at).toLocaleString()}</span>
+                      <span className="muted"> · {a.entity_type}:{a.entity_id}</span>
+                    </summary>
+                    <div className="muted" style={{ marginTop: 8 }}>
+                      {a.request_method} {a.request_path} · ip={a.request_ip || "-"} 
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 8 }}>
+                      <div>
+                        <div className="muted">before</div>
+                        <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{a.before_json || "{}"}</pre>
+                      </div>
+                      <div>
+                        <div className="muted">after</div>
+                        <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{a.after_json || "{}"}</pre>
+                      </div>
+                    </div>
+                    <div className="muted" style={{ marginTop: 8 }}>
+                      hash={a.event_hash} prev={a.prev_hash || "(genesis)"}
+                    </div>
+                  </details>
+                ))}
+                {!adminAudit.length ? <div className="muted">暂无记录</div> : null}
               </div>
 
               <div className="hr" />

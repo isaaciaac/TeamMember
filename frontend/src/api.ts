@@ -211,6 +211,34 @@ export async function adminSetConfig(key: string, value: string) {
   return await apiFetch("/admin/config", { method: "PUT", body: JSON.stringify({ key, value }) });
 }
 
+export type AdminAuditLog = {
+  id: string;
+  actor_user_id: string;
+  actor_label: string;
+  action: string;
+  entity_type: string;
+  entity_id: string;
+  request_method: string;
+  request_path: string;
+  request_ip: string;
+  user_agent: string;
+  before_json: string;
+  after_json: string;
+  prev_hash: string;
+  event_hash: string;
+  created_at: string;
+};
+
+export async function adminListAudit(opts: { limit?: number; before?: string; actor_user_id?: string; action_prefix?: string } = {}) {
+  const p = new URLSearchParams();
+  if (opts.limit != null) p.set("limit", String(opts.limit));
+  if (opts.before) p.set("before", String(opts.before));
+  if (opts.actor_user_id) p.set("actor_user_id", String(opts.actor_user_id));
+  if (opts.action_prefix) p.set("action_prefix", String(opts.action_prefix));
+  const qs = p.toString();
+  return (await apiFetch(`/admin/audit${qs ? `?${qs}` : ""}`)) as AdminAuditLog[];
+}
+
 export type AdminTeachingReview = {
   id: string;
   thread_id: string;

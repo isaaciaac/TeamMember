@@ -95,6 +95,39 @@ class AppConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
 
 
+class AuditLog(Base):
+    """
+    Append-only audit log for admin actions.
+
+    NOTE:
+    This is tamper-resistant for in-app admins (no API to modify; DB trigger blocks UPDATE/DELETE).
+    It is not tamper-proof against a database superuser with direct access to Postgres.
+    """
+
+    __tablename__ = "audit_logs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    actor_user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), index=True, nullable=False)
+    actor_label: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+
+    action: Mapped[str] = mapped_column(String(120), index=True, nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(60), default="", index=True, nullable=False)
+    entity_id: Mapped[str] = mapped_column(String(120), default="", index=True, nullable=False)
+
+    request_method: Mapped[str] = mapped_column(String(10), default="", nullable=False)
+    request_path: Mapped[str] = mapped_column(String(300), default="", nullable=False)
+    request_ip: Mapped[str] = mapped_column(String(80), default="", nullable=False)
+    user_agent: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+
+    before_json: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    after_json: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+    prev_hash: Mapped[str] = mapped_column(String(80), default="", nullable=False)
+    event_hash: Mapped[str] = mapped_column(String(80), default="", nullable=False, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True, nullable=False)
+
+
 class UserPersona(Base):
     __tablename__ = "user_persona"
 
@@ -200,6 +233,12 @@ def _migrate_schema() -> None:
         "CREATE INDEX IF NOT EXISTS ix_chat_messages_user_id ON chat_messages(user_id)",
         "CREATE INDEX IF NOT EXISTS ix_user_memory_user_id ON user_memory(user_id)",
         "CREATE INDEX IF NOT EXISTS ix_user_proactive_events_user_id ON user_proactive_events(user_id)",
+        # Audit logs are append-only (defense in depth; API never exposes update/delete anyway).
+        "CREATE OR REPLACE FUNCTION audit_logs_no_update_delete() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'audit_logs is append-only'; END $$ LANGUAGE plpgsql",
+        "DROP TRIGGER IF EXISTS audit_logs_block_update ON audit_logs",
+        "CREATE TRIGGER audit_logs_block_update BEFORE UPDATE ON audit_logs FOR EACH ROW EXECUTE FUNCTION audit_logs_no_update_delete()",
+        "DROP TRIGGER IF EXISTS audit_logs_block_delete ON audit_logs",
+        "CREATE TRIGGER audit_logs_block_delete BEFORE DELETE ON audit_logs FOR EACH ROW EXECUTE FUNCTION audit_logs_no_update_delete()",
         # If there is no admin user yet, promote the earliest user as admin (single-tenant self-hosted default).
         "UPDATE users SET is_admin = true WHERE id = (SELECT id FROM users ORDER BY created_at ASC LIMIT 1) AND NOT EXISTS (SELECT 1 FROM users WHERE is_admin = true)",
     ]

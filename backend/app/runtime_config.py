@@ -16,6 +16,11 @@ _cache = _Cache()
 _TTL_SECONDS = 3.0
 
 
+def invalidate_cache() -> None:
+    _cache.values = None
+    _cache.loaded_at = 0.0
+
+
 def _load_all() -> dict[str, str]:
     db = SessionLocal()
     try:
@@ -78,12 +83,10 @@ def set_value(key: str, value: str) -> None:
         row.value = value
         db.add(row)
         db.commit()
-        _cache.values = None
-        _cache.loaded_at = 0.0
+        invalidate_cache()
     finally:
         db.close()
 
 
 def set_bool(key: str, value: bool) -> None:
     set_value(key, "true" if value else "false")
-
