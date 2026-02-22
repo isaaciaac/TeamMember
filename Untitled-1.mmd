@@ -1,91 +1,193 @@
-
-flowchart LR
-  %% TeamMember V1 - System Architecture
-
-  subgraph Client["Client (Browser)"]
-    UI["React/Vite Web UI<br/>Threads • Chat • (Optional) Canvas • Admin"]
+```mermaid
+flowchart TD
+  %% =======================
+  %% Frontend
+  %% =======================
+  subgraph FE[前端（React/Vite + Nginx）]
+    browser[浏览器]
+    ui[TeamMember Web App]
   end
 
-  subgraph Edge["Edge / Reverse Proxy (Docker Compose)"]
-    Nginx["Nginx (serves UI + /api reverse proxy)"]
+  %% =======================
+  %% Backend
+  %% =======================
+  subgraph BE[后端（FastAPI）]
+    settingsPy[settings.py（BaseSettings from .env）]
+    runtimeCfg[runtime_config（TTL=3s；app_config 覆盖）]
+
+    auth[Auth/JWT]
+    threadAPI[Threads & Shares API]
+    chatAPI[POST /threads/:id/chat_stream（SSE）]
+    msgAPI[GET /threads/:id/messages]
+    traceAPI[GET /threads/:id/messages/:mid/trace]
+
+    adminAPI[Admin API（用户/配置/审核/审计）]
+    ingestAPI[Knowledge Ingest & Teaching API]
+    visionAPI[POST /vision/describe]
+
+    guards[Guardrails（系统提示词/画像披露/注入拦截）]
+    ctx[Context Builder（profile/persona/decision/memory）]
+    tstate[Thread State（open loops / entropy）]
+
+    router[Intent Router（decide_rag）]
+    decomp[Task Decomposer（<=5）]
+    workers[Sub-agent Workers（<=5）]
+
+    ragTool[RAG Retriever（Qdrant）]
+    webTool[Web Search Tool（Bing 摘要）]
+    synth[Final Answer Generator（Ark stream）]
+
+    bg[Background Tasks（memory/persona/thread_state）]
+    maint[Maintenance Thread（03:15 daily）]
   end
 
-  subgraph Backend["Backend (FastAPI)"]
-    API["HTTP API<br/>Auth • Threads • Chat(Stream) • Admin Config • Teaching Review"]
-    Router["Intent Router / Complexity Judge<br/>RAG: auto/force-on/force-off"]
-    Gen["LLM Generation (Ark/DeepSeek)<br/>Answer • Rewrite • Clarify Questions"]
-    Rag["RAG Orchestrator<br/>Retrieve • (Optional) Rerank • Self-check"]
-    Chunker["Semantic Chunking (LLM)<br/>Knowledge -> knowledge-point seeds"]
-    Memory["Memory Service<br/>Conversation Memory • Persona"]
-    Decision["Decision Profile Builder<br/>Risk bias • Evidence threshold"]
-    TState["Thread Semantic State<br/>Open loops • Topic entropy"]
-    Vision["Image Understanding (Qwen-VL)<br/>Screenshot -> structured JSON"]
-    Embed["Embedding (DashScope)<br/>text-embedding-v2 (1536d)"]
-    Notify["Webhook Notifier (optional)<br/>POST to Power Automate"]
-  end
-
-  subgraph Storage["Storage"]
-    PG["PostgreSQL<br/>users • threads • chat_messages<br/>thread_state • user_decision_profile<br/>app_config • teaching_queue/..."]
-    Qdrant["Qdrant Vector DB<br/>seeds + metadata + vectors"]
-    Files["Local Files / Cache<br/>uploaded images • temp exports"]
-  end
-
-  subgraph External["External Services"]
-    Ark["Volcengine Ark (OpenAI-compatible)<br/>DeepSeek model"]
-    DashScope["DashScope (Alibaba)<br/>Embedding + Qwen-VL"]
-    Sources["Data Sources<br/>SQL • OData • Manual Paste"]
-  end
-
-  %% Client -> Edge -> Backend
-  UI -->|HTTPS| Nginx
-  Nginx -->|/api/*| API
-
-  %% Backend internal calls
-  API --> Router
-  Router -->|need clarifying?| Gen
-  Router -->|RAG needed| Rag
-  Rag --> Embed
-  Rag --> Qdrant
-  Rag -->|optional rerank| Gen
-  Rag -->|final synthesis + self-check| Gen
-
-  API --> Memory
-  API --> Decision
-  API --> TState
-  API --> Vision
-
-  %% Background refresh pipelines
-  API -. after messages .-> TState
-  API -. periodic/throttled .-> Decision
-
-  %% LLM providers
-  Gen --> Ark
-  Chunker --> Ark
-  Decision --> Ark
-  TState --> Ark
-  Embed --> DashScope
-  Vision --> DashScope
-
+  %% =======================
   %% Storage
-  API <--> PG
-  Memory <--> PG
-  Decision <--> PG
-  TState <--> PG
+  %% =======================
+  subgraph ST[存储]
+    env[.env（启动时读取）]
+    pg[(PostgreSQL)]
+    appcfg[(app_config 运行时覆盖)]
+    audit[(audit_logs 只增不改 + hash chain)]
+    traceTbl[(ai_trace_runs（30天保留）)]
+    qdr[(Qdrant：tm_knowledge / tm_user_memory)]
+  end
 
-  %% Knowledge ingestion
-  Sources --> API
-  API --> Chunker
-  Chunker --> Embed
-  Embed --> Qdrant
-  API --> Qdrant
-  API --> Files
+  %% =======================
+  %% External Services
+  %% =======================
+  subgraph EXT[外部服务]
+    ark[(Volcengine Ark / DeepSeek)]
+    dashEmb[(DashScope Embedding)]
+    dashVision[(DashScope Vision)]
+    bing[(Bing Search API)]
+  end
 
-  %% Teaching feedback loop
-  UI -->|Teaching Me submit| API
-  API -->|enqueue for admin review| PG
-  API -->|"boosted retrieval (source_kind=teaching)"| Qdrant
-  API -. optional .-> Notify
+  %% =======================
+  %% Wiring: UI -> API
+  %% =======================
+  browser --> ui
+  ui --> auth
+  ui --> threadAPI
+  ui --> chatAPI
+  ui --> msgAPI
+  ui --> traceAPI
+  ui --> adminAPI
+  ui --> ingestAPI
+  ui --> visionAPI
 
-  %% Admin runtime config
-  UI -->|Admin: read/write config| API
-  API <--> PG
+  %% =======================
+  %% Config: .env + app_config
+  %% =======================
+  env --> settingsPy
+  settingsPy --> runtimeCfg
+  appcfg --> runtimeCfg
+
+  runtimeCfg --> router
+  runtimeCfg --> ragTool
+  runtimeCfg --> webTool
+  runtimeCfg --> maint
+
+  %% =======================
+  %% Auth / Threads
+  %% =======================
+  auth --> pg
+  threadAPI --> pg
+
+  %% =======================
+  %% Chat pipeline
+  %% =======================
+  chatAPI -->|写入 user chat_message + 更新 thread.updated_at| pg
+  chatAPI -->|读取 thread_state| tstate
+  tstate -->|read| pg
+
+  chatAPI --> guards --> ctx
+  ctx -->|读取 users/profile/persona/decision| pg
+  ctx -->|memory 向量召回| dashEmb --> qdr
+
+  ctx --> router
+  router -->|LLM JSON| ark
+
+  %% =======================
+  %% Tool decisions
+  %% =======================
+  router -->|use_rag| ragTool
+  router -->|use_web + enabled + 有 Bing Key| webTool
+  router -->|suggest_decompose| decomp
+
+  %% =======================
+  %% RAG (Qdrant)
+  %% =======================
+  ragTool -->|embed query| dashEmb
+  ragTool -->|vector search| qdr
+  ragTool -->|optional rerank（doc>=threshold）| ark
+  ark -->|rerank order| ragTool
+  ragTool -->|hits| synth
+
+  %% =======================
+  %% Web search (summary only)
+  %% =======================
+  webTool -->|queries| bing
+  bing -->|title/snippet/url| webTool
+  webTool -->|summaries| synth
+  webTool -->|summaries（子任务可用）| workers
+
+  %% =======================
+  %% Decompose + subagents
+  %% =======================
+  decomp -->|LLM tasks JSON| ark
+  decomp --> workers
+  workers -->|可选 RAG/Web| ragTool
+  workers -->|可选 RAG/Web| webTool
+  workers -->|LLM worker JSON| ark
+  workers --> synth
+
+  %% =======================
+  %% Trace (transparency/debug)
+  %% =======================
+  chatAPI -->|创建 trace（router/web/decompose/subagent）| traceTbl
+  synth -->|写入 assistant chat_message| pg
+  synth -->|更新 trace（assistant_message_id/error）| traceTbl
+  traceTbl --> pg
+  traceAPI --> traceTbl
+  msgAPI --> pg
+
+  %% =======================
+  %% Stream back to UI
+  %% =======================
+  synth -->|SSE delta 流式输出| ui
+
+  %% =======================
+  %% Background tasks
+  %% =======================
+  synth --> bg
+  bg -->|记忆抽取/画像刷新/线程状态刷新| ark --> pg
+  bg -->|记忆向量写入| dashEmb --> qdr
+
+  %% =======================
+  %% Vision
+  %% =======================
+  visionAPI --> dashVision --> visionAPI
+  visionAPI -->|vision_json| ui
+
+  %% =======================
+  %% Knowledge ingest / teaching
+  %% =======================
+  ingestAPI -->|语义分点（知识点）| ark
+  ingestAPI -->|embedding| dashEmb --> qdr
+  ingestAPI -->|数据源/审核记录| pg
+  adminAPI -->|审批 Teaching -> 写入 teaching seeds| qdr
+
+  %% =======================
+  %% Admin config + audit
+  %% =======================
+  adminAPI --> appcfg --> pg
+  adminAPI -->|审计（只增不改）| audit --> pg
+
+  %% =======================
+  %% Maintenance
+  %% =======================
+  maint -->|刷新 Decision Profile（>=5天）| ark --> pg
+  maint -->|清理过期 trace（>30天）| traceTbl
+
+```
