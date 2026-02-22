@@ -48,6 +48,20 @@ class Settings(BaseSettings):
     topic_guard_enabled: bool = False
     topic_allowed_topics: str = "21V Microsoft 365（世纪互联）及相关的 Power Platform / Dynamics 365"
 
+    # Web search (Bing)
+    bing_search_api_key: str = ""
+    bing_search_endpoint: str = "https://api.bing.microsoft.com/v7.0/search"
+    bing_search_market: str = "zh-CN"
+    bing_search_safe_search: str = "Moderate"  # Off | Moderate | Strict
+    web_search_enabled: bool = False
+    web_search_top_k: int = 5
+    web_search_max_queries: int = 2
+
+    # Sub-agent decomposition
+    agent_decompose_policy: str = "auto"  # auto | force_on | force_off
+    agent_decompose_bias: int = 30  # 0..100 (higher => decompose more often)
+    agent_max_subtasks: int = 5
+
     # Memory
     memory_enabled: bool = True
     memory_top_k: int = 5
@@ -73,6 +87,10 @@ class Settings(BaseSettings):
     # Whether the assistant is allowed to disclose internal Persona/DecisionProfile summaries to users.
     # Recommended: keep false in production.
     persona_disclosure_enabled: bool = False
+
+    # AI trace (routing/tools/sub-agents) for debugging & transparency
+    ai_trace_enabled: bool = True
+    ai_trace_retention_days: int = 30
 
 
 settings = Settings()

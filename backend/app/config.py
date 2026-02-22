@@ -70,6 +70,54 @@ def topic_allowed_topics() -> str:
     return (v or "").strip()
 
 
+def web_search_enabled() -> bool:
+    return get_bool("web_search_enabled", bool(settings.web_search_enabled))
+
+
+def web_search_top_k() -> int:
+    raw = get_str("web_search_top_k", str(settings.web_search_top_k))
+    try:
+        v = int(raw)
+    except Exception:
+        v = int(settings.web_search_top_k)
+    return max(1, min(10, v))
+
+
+def web_search_max_queries() -> int:
+    raw = get_str("web_search_max_queries", str(settings.web_search_max_queries))
+    try:
+        v = int(raw)
+    except Exception:
+        v = int(settings.web_search_max_queries)
+    return max(1, min(5, v))
+
+
+def agent_decompose_policy() -> str:
+    v = get_str("agent_decompose_policy", settings.agent_decompose_policy)
+    v = (v or "").strip().lower()
+    if v not in {"auto", "force_on", "force_off"}:
+        return (settings.agent_decompose_policy or "auto").strip().lower()
+    return v
+
+
+def agent_decompose_bias() -> int:
+    raw = get_str("agent_decompose_bias", str(settings.agent_decompose_bias))
+    try:
+        v = int(raw)
+    except Exception:
+        v = int(settings.agent_decompose_bias)
+    return max(0, min(100, v))
+
+
+def agent_max_subtasks() -> int:
+    raw = get_str("agent_max_subtasks", str(settings.agent_max_subtasks))
+    try:
+        v = int(raw)
+    except Exception:
+        v = int(settings.agent_max_subtasks)
+    return max(1, min(10, v))
+
+
 def proactive_enabled() -> bool:
     return get_bool("proactive_enabled", bool(settings.proactive_enabled))
 
@@ -136,3 +184,16 @@ def decision_profile_refresh_hours() -> int:
 
 def persona_disclosure_enabled() -> bool:
     return get_bool("persona_disclosure_enabled", bool(settings.persona_disclosure_enabled))
+
+
+def ai_trace_enabled() -> bool:
+    return get_bool("ai_trace_enabled", bool(settings.ai_trace_enabled))
+
+
+def ai_trace_retention_days() -> int:
+    raw = get_str("ai_trace_retention_days", str(settings.ai_trace_retention_days))
+    try:
+        v = int(raw)
+    except Exception:
+        v = int(settings.ai_trace_retention_days)
+    return max(1, min(365, v))

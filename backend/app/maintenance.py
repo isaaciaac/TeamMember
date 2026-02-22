@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
-from .config import decision_profile_enabled, decision_profile_refresh_hours, proactive_timezone
+from .config import ai_trace_retention_days, decision_profile_enabled, decision_profile_refresh_hours, proactive_timezone
 from .db import SessionLocal, User, UserDecisionProfile, engine
 from .memory import background_refresh_decision_profile
 
@@ -20,6 +20,7 @@ _START_LOCK = threading.Lock()
 
 # A fixed advisory lock id to prevent duplicate maintenance runs when multiple processes exist.
 _LOCK_DECISION_PROFILE = 903184221
+_LOCK_AI_TRACE_CLEANUP = 903184222
 
 # "Idle time" maintenance target (local timezone).
 _RUN_AT_HOUR = 3
@@ -74,6 +75,7 @@ def _maintenance_loop() -> None:
             if sleep_s > 0:
                 time.sleep(sleep_s)
             _run_decision_profile_maintenance()
+            _cleanup_ai_traces()
             # Avoid accidental double-run if system clock jumps.
             time.sleep(2.0)
         except Exception:
@@ -127,3 +129,30 @@ def _run_decision_profile_maintenance() -> None:
         except Exception:
             pass
 
+
+def _cleanup_ai_traces() -> None:
+    days = int(ai_trace_retention_days() or 0)
+    days = max(1, min(365, days))
+    threshold = datetime.now(timezone.utc) - timedelta(days=days)
+
+    conn = engine.connect()
+    try:
+        got = conn.execute(text("SELECT pg_try_advisory_lock(:id)"), {"id": _LOCK_AI_TRACE_CLEANUP}).scalar()
+        if not got:
+            return
+        res = conn.execute(text("DELETE FROM ai_trace_runs WHERE created_at < :th"), {"th": threshold})
+        try:
+            deleted = int(getattr(res, "rowcount", 0) or 0)
+        except Exception:
+            deleted = 0
+        if deleted:
+            _LOG.info("ai_trace cleanup: deleted=%s retention_days=%s", deleted, days)
+    finally:
+        try:
+            conn.execute(text("SELECT pg_advisory_unlock(:id)"), {"id": _LOCK_AI_TRACE_CLEANUP})
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass

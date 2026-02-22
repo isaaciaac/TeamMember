@@ -61,6 +61,32 @@ class ChatMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
 
+class AiTraceRun(Base):
+    """
+    Per-request trace for routing/tools/sub-agents.
+
+    This is for transparency/debugging (not security). Retention is enforced by a daily cleanup job.
+    """
+
+    __tablename__ = "ai_trace_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    thread_id: Mapped[str] = mapped_column(String(36), ForeignKey("threads.id"), index=True, nullable=False)
+    actor_user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), index=True, nullable=False)
+
+    user_message_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    assistant_message_id: Mapped[str] = mapped_column(String(36), index=True, default="", nullable=False)
+
+    router_json: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    web_search_json: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    decompose_json: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    subagent_json: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
+
+
 class ThreadShare(Base):
     __tablename__ = "thread_shares"
     __table_args__ = (UniqueConstraint("thread_id", "shared_with_user_id", name="uq_thread_share"),)

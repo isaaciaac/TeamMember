@@ -97,6 +97,25 @@ export async function listMessages(threadId: string) {
   return (await apiFetch(`/threads/${threadId}/messages`)) as ChatMessage[];
 }
 
+export type AiTrace = {
+  id: string;
+  thread_id: string;
+  actor_user_id: string;
+  user_message_id: string;
+  assistant_message_id: string;
+  router: any;
+  web_search: any;
+  decompose: any;
+  subagent: any;
+  error: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export async function getMessageTrace(threadId: string, messageId: string) {
+  return (await apiFetch(`/threads/${threadId}/messages/${messageId}/trace`)) as AiTrace;
+}
+
 export async function chatStream(threadId: string, message: string, onDelta: (d: string) => void) {
   const base = _apiBase ? _apiBase.replace(/\/$/, "") : "";
   const resp = await fetch(`${base}/api/threads/${threadId}/chat_stream`, {

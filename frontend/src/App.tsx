@@ -26,6 +26,9 @@ export default function App() {
   const [teachingSubmitting, setTeachingSubmitting] = useState(false);
   const [reviewDetailOpen, setReviewDetailOpen] = useState(false);
   const [reviewDetail, setReviewDetail] = useState<any>(null);
+  const [traceOpen, setTraceOpen] = useState(false);
+  const [traceLoading, setTraceLoading] = useState(false);
+  const [traceData, setTraceData] = useState<api.AiTrace | null>(null);
 
   const [profileName, setProfileName] = useState("");
   const [profileText, setProfileText] = useState("");
@@ -40,6 +43,14 @@ export default function App() {
   const [cfgRagMaxContext, setCfgRagMaxContext] = useState("12");
   const [cfgRagTeachingScoreBoost, setCfgRagTeachingScoreBoost] = useState("0.05");
   const [cfgRagTeachingCandidates, setCfgRagTeachingCandidates] = useState("40");
+  const [cfgWebSearchEnabled, setCfgWebSearchEnabled] = useState(false);
+  const [cfgWebSearchTopK, setCfgWebSearchTopK] = useState("5");
+  const [cfgWebSearchMaxQueries, setCfgWebSearchMaxQueries] = useState("2");
+  const [cfgAgentDecomposePolicy, setCfgAgentDecomposePolicy] = useState("auto");
+  const [cfgAgentDecomposeBias, setCfgAgentDecomposeBias] = useState("30");
+  const [cfgAgentMaxSubtasks, setCfgAgentMaxSubtasks] = useState("5");
+  const [cfgAiTraceEnabled, setCfgAiTraceEnabled] = useState(true);
+  const [cfgAiTraceRetentionDays, setCfgAiTraceRetentionDays] = useState("30");
   const [cfgMemoryEnabled, setCfgMemoryEnabled] = useState(true);
   const [cfgMemoryTopK, setCfgMemoryTopK] = useState("5");
   const [cfgTopicGuardEnabled, setCfgTopicGuardEnabled] = useState(false);
@@ -269,6 +280,21 @@ export default function App() {
     setMessages(ms);
   }
 
+  async function openTrace(messageId: string) {
+    if (!activeThreadId) return;
+    setError("");
+    setTraceLoading(true);
+    try {
+      const tr = await api.getMessageTrace(activeThreadId, messageId);
+      setTraceData(tr);
+      setTraceOpen(true);
+    } catch (e: any) {
+      setError(String(e?.message || e));
+    } finally {
+      setTraceLoading(false);
+    }
+  }
+
   function openTeaching() {
     setTeachingInstruction("");
     setTeachingResult("");
@@ -448,6 +474,14 @@ export default function App() {
       setCfgRagMaxContext(String(cfg?.effective?.rag_max_context ?? "12"));
       setCfgRagTeachingScoreBoost(String(cfg?.effective?.rag_teaching_score_boost ?? "0.05"));
       setCfgRagTeachingCandidates(String(cfg?.effective?.rag_teaching_candidates ?? "40"));
+      setCfgWebSearchEnabled(Boolean(cfg?.effective?.web_search_enabled ?? false));
+      setCfgWebSearchTopK(String(cfg?.effective?.web_search_top_k ?? "5"));
+      setCfgWebSearchMaxQueries(String(cfg?.effective?.web_search_max_queries ?? "2"));
+      setCfgAgentDecomposePolicy(String(cfg?.effective?.agent_decompose_policy || "auto"));
+      setCfgAgentDecomposeBias(String(cfg?.effective?.agent_decompose_bias ?? "30"));
+      setCfgAgentMaxSubtasks(String(cfg?.effective?.agent_max_subtasks ?? "5"));
+      setCfgAiTraceEnabled(Boolean(cfg?.effective?.ai_trace_enabled ?? true));
+      setCfgAiTraceRetentionDays(String(cfg?.effective?.ai_trace_retention_days ?? "30"));
       setCfgMemoryEnabled(Boolean(cfg?.effective?.memory_enabled));
       setCfgMemoryTopK(String(cfg?.effective?.memory_top_k ?? "5"));
       setCfgTopicGuardEnabled(Boolean(cfg?.effective?.topic_guard_enabled));
@@ -546,6 +580,14 @@ export default function App() {
       await api.adminSetConfig("rag_max_context", cfgRagMaxContext);
       await api.adminSetConfig("rag_teaching_score_boost", cfgRagTeachingScoreBoost);
       await api.adminSetConfig("rag_teaching_candidates", cfgRagTeachingCandidates);
+      await api.adminSetConfig("web_search_enabled", cfgWebSearchEnabled ? "true" : "false");
+      await api.adminSetConfig("web_search_top_k", cfgWebSearchTopK);
+      await api.adminSetConfig("web_search_max_queries", cfgWebSearchMaxQueries);
+      await api.adminSetConfig("agent_decompose_policy", cfgAgentDecomposePolicy);
+      await api.adminSetConfig("agent_decompose_bias", cfgAgentDecomposeBias);
+      await api.adminSetConfig("agent_max_subtasks", cfgAgentMaxSubtasks);
+      await api.adminSetConfig("ai_trace_enabled", cfgAiTraceEnabled ? "true" : "false");
+      await api.adminSetConfig("ai_trace_retention_days", cfgAiTraceRetentionDays);
       await api.adminSetConfig("memory_enabled", cfgMemoryEnabled ? "true" : "false");
       await api.adminSetConfig("memory_top_k", cfgMemoryTopK);
       await api.adminSetConfig("topic_guard_enabled", cfgTopicGuardEnabled ? "true" : "false");
@@ -857,15 +899,22 @@ export default function App() {
           ) : null}
           <div className="chat">
             {messages.map((m) => (
-              <div key={m.id} className="msg">
-                <div className="meta">
-                  <div>{m.role === "user" ? "你" : m.role === "assistant" ? "AI" : m.role}</div>
-                  <div>{new Date(m.created_at).toLocaleString()}</div>
-                </div>
-                {m.role === "assistant" ? (
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content || ""}</ReactMarkdown>
-                ) : (
-                  <div style={{ whiteSpace: "pre-wrap" }}>{m.content}</div>
+                <div key={m.id} className="msg">
+                  <div className="meta">
+                    <div>{m.role === "user" ? "你" : m.role === "assistant" ? "AI" : m.role}</div>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      <div>{new Date(m.created_at).toLocaleString()}</div>
+                      {m.role === "assistant" && !String(m.id || "").startsWith("tmp_") ? (
+                        <button className="btn" onClick={() => openTrace(m.id)} disabled={traceLoading || streaming}>
+                          工具/Trace
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+                  {m.role === "assistant" ? (
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content || ""}</ReactMarkdown>
+                  ) : (
+                    <div style={{ whiteSpace: "pre-wrap" }}>{m.content}</div>
                 )}
               </div>
             ))}
@@ -910,6 +959,79 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      {traceOpen ? (
+        <div className="modalBackdrop" onClick={() => setTraceOpen(false)}>
+          <div className="modalCard" onClick={(e) => e.stopPropagation()}>
+            <div className="modalHeader">
+              <div style={{ fontWeight: 700 }}>工具 / AI Trace（30 天自动清理）</div>
+              <button className="btn" onClick={() => setTraceOpen(false)}>
+                关闭
+              </button>
+            </div>
+            <div className="modalBody">
+              {traceData ? (
+                <>
+                  <div className="muted" style={{ marginBottom: 10 }}>
+                    trace_id={traceData.id} · {new Date(traceData.created_at).toLocaleString()}
+                  </div>
+                  {traceData.error ? <div className="error" style={{ marginBottom: 10 }}>{traceData.error}</div> : null}
+
+                  <div style={{ fontWeight: 700, marginBottom: 8 }}>路由决策</div>
+                  <pre className="msg" style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(traceData.router || {}, null, 2)}</pre>
+
+                  <div className="hr" />
+                  <div style={{ fontWeight: 700, marginBottom: 8 }}>Web Search（摘要）</div>
+                  {(() => {
+                    const ws: any = (traceData as any).web_search || {};
+                    const results: any = ws.results || {};
+                    const qs: string[] = Array.isArray(ws.queries) ? ws.queries : Object.keys(results || {});
+                    if (!qs.length) return <div className="muted">本次未使用 Web Search</div>;
+                    return (
+                      <div style={{ display: "grid", gap: 10 }}>
+                        {qs.map((q) => {
+                          const rs: any[] = Array.isArray(results?.[q]) ? results[q] : [];
+                          return (
+                            <div key={q} className="msg" style={{ margin: 0 }}>
+                              <div style={{ fontWeight: 700, marginBottom: 6 }}>{q}</div>
+                              {!rs.length ? <div className="muted">无结果</div> : null}
+                              <div style={{ display: "grid", gap: 6 }}>
+                                {rs.slice(0, 8).map((r, idx) => (
+                                  <div key={idx} style={{ padding: "6px 0", borderBottom: "1px solid var(--border)" }}>
+                                    <div style={{ fontWeight: 600 }}>{r.title || "(no title)"}</div>
+                                    {r.url ? (
+                                      <div className="muted" style={{ marginTop: 2 }}>
+                                        <a href={String(r.url)} target="_blank" rel="noreferrer">
+                                          {String(r.url)}
+                                        </a>
+                                      </div>
+                                    ) : null}
+                                    {r.snippet ? <div style={{ marginTop: 6, whiteSpace: "pre-wrap" }}>{String(r.snippet)}</div> : null}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
+
+                  <div className="hr" />
+                  <div style={{ fontWeight: 700, marginBottom: 8 }}>子任务拆分</div>
+                  <pre className="msg" style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(traceData.decompose || {}, null, 2)}</pre>
+
+                  <div className="hr" />
+                  <div style={{ fontWeight: 700, marginBottom: 8 }}>子Agent 结果</div>
+                  <pre className="msg" style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(traceData.subagent || [], null, 2)}</pre>
+                </>
+              ) : (
+                <div className="muted">暂无 trace 数据</div>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {settingsOpen ? (
         <div className="modalBackdrop" onClick={() => setSettingsOpen(false)}>
@@ -1062,6 +1184,56 @@ export default function App() {
                 <div className="field">
                   <label>Teaching Candidates</label>
                   <input value={cfgRagTeachingCandidates} onChange={(e) => setCfgRagTeachingCandidates(e.target.value)} />
+                </div>
+                <div className="field">
+                  <label>Web Search</label>
+                  <div className="row">
+                    <label className="muted" style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      <input type="checkbox" checked={cfgWebSearchEnabled} onChange={(e) => setCfgWebSearchEnabled(e.target.checked)} />
+                      允许按需 Web Search（Bing 摘要）
+                    </label>
+                  </div>
+                </div>
+                <div className="field">
+                  <label>Web TopK</label>
+                  <input value={cfgWebSearchTopK} onChange={(e) => setCfgWebSearchTopK(e.target.value)} />
+                </div>
+                <div className="field">
+                  <label>Web Max Queries</label>
+                  <input value={cfgWebSearchMaxQueries} onChange={(e) => setCfgWebSearchMaxQueries(e.target.value)} />
+                </div>
+                <div className="field">
+                  <label>子Agent 策略</label>
+                  <select
+                    value={cfgAgentDecomposePolicy}
+                    onChange={(e) => setCfgAgentDecomposePolicy(e.target.value)}
+                    style={{ width: "100%", padding: 10, borderRadius: 12, border: "1px solid var(--border)" }}
+                  >
+                    <option value="auto">auto（自动拆分）</option>
+                    <option value="force_on">force_on（强制拆分）</option>
+                    <option value="force_off">force_off（强制不拆分）</option>
+                  </select>
+                </div>
+                <div className="field">
+                  <label>子Agent 偏好（0..100）</label>
+                  <input value={cfgAgentDecomposeBias} onChange={(e) => setCfgAgentDecomposeBias(e.target.value)} />
+                </div>
+                <div className="field">
+                  <label>子任务上限</label>
+                  <input value={cfgAgentMaxSubtasks} onChange={(e) => setCfgAgentMaxSubtasks(e.target.value)} />
+                </div>
+                <div className="field">
+                  <label>AI Trace</label>
+                  <div className="row">
+                    <label className="muted" style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      <input type="checkbox" checked={cfgAiTraceEnabled} onChange={(e) => setCfgAiTraceEnabled(e.target.checked)} />
+                      记录路由/工具/子任务（保留期自动清理）
+                    </label>
+                  </div>
+                </div>
+                <div className="field">
+                  <label>Trace 保留天数</label>
+                  <input value={cfgAiTraceRetentionDays} onChange={(e) => setCfgAiTraceRetentionDays(e.target.value)} />
                 </div>
                 <div className="field">
                   <label>Memory Enabled</label>
