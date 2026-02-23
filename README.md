@@ -10,8 +10,11 @@ TeamMember 是一个面向“团队成员协作 + 知识融合 + 记忆与画像
 4) 纠错回写：支持把对话中的纠错/沉淀提交为 Teaching，管理员审核通过后写入知识库；检索时会对 `source_kind=teaching` 做轻量加权（可配置）。
 5) 管理审计：管理员对系统的关键变更（配置、权限、审核操作）会写入 append-only 审计日志。应用层不提供修改接口，数据库层也禁止对审计表做 UPDATE/DELETE（只允许 INSERT）。
 6) 按需 Web Search：当路由器判断需要外部公开线索时，可调用 Bing Search API 获取“标题/摘要/URL”（不抓正文），并与 RAG 一起用于回答（可开关）。
-7) 子 Agent 拆分：当路由器判断任务复杂度较高时，可把任务拆成最多 5 个子任务，分别由子 Agent（同一个模型）处理，再综合成最终答复（可调“更少拆分 / 更多拆分”）。
-8) AI Trace（30 天）：每次对话可记录“路由决策 / Web Search 摘要 / 子任务拆分 / 子 Agent 结果”等调试信息，普通用户可在 UI 查看（可开关，自动清理）。
+7) 深度思考模式（固定 5 角色）：当路由器判断任务复杂度较高时，会进入“深度思考模式”，依次运行 5 个固定角色子 Agent（同一个模型），再由最终回答综合（可调“更少触发 / 更多触发 / 强制开关”）。
+   - 5 角色：发散 / 检索&证据 / 反例&缺口&风险 / 问题收敛 / 用户沟通稿
+   - 前端会显示实时状态（SSE meta），例如“已进入深度思考模式”“正在检索 RAG”“深度思考 3/5：反例/风险…”。
+8) AI Trace（30 天）：每次对话可记录“路由决策 / Web Search 摘要 / 深度思考角色结果”等调试信息，普通用户可在 UI 查看（可开关，自动清理）。
+9) AI Trace 学习建议（Level 2）：系统会基于近 7 天 Trace 的统计给出“参数建议”（例如子 Agent 偏好、Web Search query 上限等），仅展示，不会自动修改系统参数。
 
 ## 一键启动
 
@@ -51,9 +54,9 @@ TeamMember 是一个面向“团队成员协作 + 知识融合 + 记忆与画像
 
 - Web Search 的结果可能过时/不完整：后端系统提示词已要求模型“不要被 Web 摘要绑架”，必须给出验证步骤或反问收敛。
 
-## 子 Agent 拆分（最多 5 个子任务）
+## 深度思考模式（固定 5 角色）
 
-用途：当问题涉及多个目标/多系统/多分支时，先拆分成子任务（<=5），分别得到结果，再综合输出。
+用途：当问题涉及多个目标/多系统/多分支时，用固定 5 角色的方式并行/多视角分析，再综合输出，减少模型被单一证据绑架。
 
 相关运行时配置（Admin 面板）：
 
@@ -74,6 +77,20 @@ TeamMember 是一个面向“团队成员协作 + 知识融合 + 记忆与画像
 
 - 默认保留 30 天；后端维护线程每天清理过期记录。
 - 可通过 Admin 面板修改 `ai_trace_retention_days`。
+
+## AI Trace 学习建议（Level 2，仅建议，不自动生效）
+
+用途：基于近 7 天的 AI Trace 统计给出“参数建议”，用于帮助管理员调优（例如：子 Agent 触发是否偏多/偏少，Web Search 是否应该启用/增减 query 上限）。
+
+特性：
+
+- 只展示建议，不会自动修改系统参数（不会写回 `app_config`）。
+- 每天凌晨维护线程会尝试生成一次；管理员也可以在 Admin 面板里手动点“刷新建议”。
+
+查看方式：
+
+- 前端：`Admin` 面板的 “AI Trace 学习建议（Level 2）” 区域。
+- API：`GET /api/admin/ai_trace/insights?limit=10`（仅管理员可访问；可加 `refresh=true` 立即生成一条）。
 
 ## 管理审计（Audit Log）
 
@@ -146,8 +163,8 @@ flowchart LR
     Guards["Guardrails<br/>anti prompt-leak • anti persona/decision disclosure"]
 
     Router["Intent Router / Tool Router<br/>RAG/Web/Decompose decision"]
-    Decomp["Task Decomposer<br/><= 5 subtasks"]
-    SubAgents["Sub-agent Workers<br/><= 5 (same model)"]
+    Decomp["Deep Thinking Orchestrator<br/>fixed 5 roles"]
+    SubAgents["Role Agents (same model)<br/>Diverge • Evidence • Skeptic • Converge • Draft"]
 
     Rag["RAG Orchestrator<br/>Retrieve • Optional Rerank • Self-check"]
     Web["Web Search Tool (Bing)<br/>summary-only: title/snippet/url"]
@@ -160,7 +177,8 @@ flowchart LR
     Vision["Image Understanding (Qwen-VL)<br/>screenshot -> structured JSON"]
     Embed["Embedding (DashScope)<br/>text-embedding-v2 (1536d)"]
 
-    Trace["AI Trace (debug)<br/>router/web/decompose/subagent<br/>(30-day retention)"]
+    Trace["AI Trace (debug)<br/>router/web/deep/roles<br/>(30-day retention)"]
+    Learn["Trace Learning (Level 2)<br/>suggestions only (no auto-apply)"]
     Audit["Admin Audit Log<br/>append-only + hash chain"]
     Maint["Maintenance Thread<br/>03:15 daily cleanup/refresh"]
     Notify["Webhook Notifier (optional)<br/>POST to Power Automate"]
@@ -168,6 +186,7 @@ flowchart LR
 
   subgraph Storage["Storage"]
     PG["PostgreSQL<br/>users • threads • chat_messages<br/>thread_state • app_config<br/>audit_logs • ai_trace_runs • teaching queue..."]
+    PG2["PostgreSQL<br/>ai_trace_insights (suggestions)"]
     Qdrant["Qdrant Vector DB<br/>knowledge seeds • user memory"]
   end
 
@@ -200,8 +219,10 @@ flowchart LR
 
   %% Trace & audit
   API --> Trace --> PG
+  Trace --> Learn --> PG2
   API --> Audit --> PG
   Maint -->|purge expired traces| PG
+  Maint -->|periodic insight| PG2
 
   %% Knowledge ingestion
   Sources --> API --> Chunker --> Ark

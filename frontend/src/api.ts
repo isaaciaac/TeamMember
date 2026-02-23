@@ -116,7 +116,12 @@ export async function getMessageTrace(threadId: string, messageId: string) {
   return (await apiFetch(`/threads/${threadId}/messages/${messageId}/trace`)) as AiTrace;
 }
 
-export async function chatStream(threadId: string, message: string, onDelta: (d: string) => void) {
+export async function chatStream(
+  threadId: string,
+  message: string,
+  onDelta: (d: string) => void,
+  onMeta?: (meta: any) => void,
+) {
   const base = _apiBase ? _apiBase.replace(/\/$/, "") : "";
   const resp = await fetch(`${base}/api/threads/${threadId}/chat_stream`, {
     method: "POST",
@@ -148,6 +153,7 @@ export async function chatStream(threadId: string, message: string, onDelta: (d:
       const jsonStr = line.slice(6);
       try {
         const evt = JSON.parse(jsonStr);
+        if (evt.meta && onMeta) onMeta(evt.meta);
         if (evt.delta) onDelta(String(evt.delta));
         if (evt.error) throw new Error(String(evt.error));
       } catch (e: any) {
@@ -228,6 +234,24 @@ export async function adminGetConfig() {
 
 export async function adminSetConfig(key: string, value: string) {
   return await apiFetch("/admin/config", { method: "PUT", body: JSON.stringify({ key, value }) });
+}
+
+export type AdminTraceInsight = {
+  id: string;
+  window_start: string;
+  window_end: string;
+  trace_count: number;
+  stats: any;
+  suggestions: any[];
+  created_at: string;
+};
+
+export async function adminListTraceInsights(opts: { limit?: number; refresh?: boolean } = {}) {
+  const p = new URLSearchParams();
+  if (opts.limit != null) p.set("limit", String(opts.limit));
+  if (opts.refresh != null) p.set("refresh", opts.refresh ? "true" : "false");
+  const qs = p.toString();
+  return (await apiFetch(`/admin/ai_trace/insights${qs ? `?${qs}` : ""}`)) as AdminTraceInsight[];
 }
 
 export type AdminAuditLog = {

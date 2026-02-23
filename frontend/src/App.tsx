@@ -17,6 +17,9 @@ export default function App() {
   const [messages, setMessages] = useState<api.ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [streaming, setStreaming] = useState(false);
+  const [streamStatus, setStreamStatus] = useState("");
+  const [streamMode, setStreamMode] = useState<"normal" | "deep">("normal");
+  const [streamStage, setStreamStage] = useState("");
   const [error, setError] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [adminOpen, setAdminOpen] = useState(false);
@@ -36,6 +39,7 @@ export default function App() {
   const [adminUsers, setAdminUsers] = useState<api.AdminUser[]>([]);
   const [adminConfig, setAdminConfig] = useState<any>(null);
   const [adminAudit, setAdminAudit] = useState<api.AdminAuditLog[]>([]);
+  const [traceInsights, setTraceInsights] = useState<api.AdminTraceInsight[]>([]);
   const [teachingReviews, setTeachingReviews] = useState<api.AdminTeachingReview[]>([]);
   const [teachingReviewStatus, setTeachingReviewStatus] = useState<"pending" | "approved" | "rejected" | "all">("pending");
   const [cfgRagPolicy, setCfgRagPolicy] = useState("auto");
@@ -373,6 +377,9 @@ export default function App() {
     setChatInput("");
     setError("");
     setStreaming(true);
+    setStreamStatus("");
+    setStreamMode("normal");
+    setStreamStage("");
 
     const writeIntent = isWriteIntent(text);
     if (writeIntent) {
@@ -388,7 +395,10 @@ export default function App() {
 
     let acc = "";
     try {
-      await api.chatStream(activeThreadId, text, (d) => {
+      await api.chatStream(
+        activeThreadId,
+        text,
+        (d) => {
         acc += d;
         setMessages((m) => {
           const copy = [...m];
@@ -398,7 +408,15 @@ export default function App() {
           }
           return copy;
         });
-      });
+        },
+        (meta) => {
+          try {
+            if (meta && typeof meta.status === "string") setStreamStatus(meta.status);
+            if (meta && typeof meta.mode === "string") setStreamMode(meta.mode === "deep" ? "deep" : "normal");
+            if (meta && typeof meta.stage === "string") setStreamStage(meta.stage);
+          } catch { }
+        },
+      );
       if (writeIntent && acc.trim() && thread && (thread.permission === "owner" || thread.permission === "write")) {
         await api.updateThread(activeThreadId, { canvas_md: acc });
         setThread((prev: any) => (prev ? { ...prev, canvas_md: acc } : prev));
@@ -408,6 +426,9 @@ export default function App() {
       setError(String(e?.message || e));
     } finally {
       setStreaming(false);
+      setStreamStatus("");
+      setStreamStage("");
+      setStreamMode("normal");
       // reload from server to get real ids
       await refreshChat();
     }
@@ -462,12 +483,14 @@ export default function App() {
       const users = await api.adminListUsers();
       const cfg = await api.adminGetConfig();
       const aud = await api.adminListAudit({ limit: 200 }).catch(() => []);
+      const insights = await api.adminListTraceInsights({ limit: 10 }).catch(() => []);
       const reviews = await api.adminListTeachingReviews(teachingReviewStatus).catch(() => []);
       const ks = await api.knowledgeStats().catch(() => null);
       const ss = await api.listSources().catch(() => []);
       setAdminUsers(users);
       setAdminConfig(cfg);
       setAdminAudit(aud as any);
+      setTraceInsights(insights as any);
       setTeachingReviews(reviews as any);
       setCfgRagPolicy(String(cfg?.effective?.rag_policy || "auto"));
       setCfgRagTopK(String(cfg?.effective?.rag_top_k ?? "10"));
@@ -511,6 +534,16 @@ export default function App() {
     try {
       const aud = await api.adminListAudit({ limit: 200 });
       setAdminAudit(aud);
+    } catch (e: any) {
+      setError(String(e?.message || e));
+    }
+  }
+
+  async function refreshTraceInsights(force: boolean = false) {
+    setError("");
+    try {
+      const rows = await api.adminListTraceInsights({ limit: 10, refresh: force });
+      setTraceInsights(rows);
     } catch (e: any) {
       setError(String(e?.message || e));
     }
@@ -922,6 +955,14 @@ export default function App() {
           </div>
           <div className="inputbar">
             {error ? <div className="error" style={{ marginBottom: 8 }}>{error}</div> : null}
+            {streaming && streamStatus ? (
+              <div className="msg" style={{ marginBottom: 8, padding: "8px 10px", background: streamMode === "deep" ? "#eef6ff" : "#fff" }}>
+                <div style={{ fontWeight: 700, marginBottom: 2 }}>{streamMode === "deep" ? "深度思考模式" : "处理中"}</div>
+                <div className="muted" style={{ whiteSpace: "pre-wrap" }}>
+                  {streamStatus}{streamStage ? `（${streamStage}）` : ""}
+                </div>
+              </div>
+            ) : null}
             <textarea
               value={chatInput}
               onChange={(e) => setChatInput(e.target.value)}
@@ -1234,6 +1275,45 @@ export default function App() {
                 <div className="field">
                   <label>Trace 保留天数</label>
                   <input value={cfgAiTraceRetentionDays} onChange={(e) => setCfgAiTraceRetentionDays(e.target.value)} />
+                </div>
+                <div className="field" style={{ gridColumn: "1 / -1" }}>
+                  <label>AI Trace 学习建议（Level 2，仅建议，不自动生效）</label>
+                  <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+                    <div className="muted">
+                      {traceInsights?.[0]
+                        ? `最近一次：${new Date(traceInsights[0].created_at).toLocaleString()} · window=${new Date(traceInsights[0].window_start).toLocaleDateString()}~${new Date(traceInsights[0].window_end).toLocaleDateString()} · traces=${traceInsights[0].trace_count}`
+                        : "暂无建议（Trace 太少或尚未生成）"}
+                    </div>
+                    <div className="row">
+                      <button className="btn" onClick={() => refreshTraceInsights(false)} disabled={!adminOpen}>
+                        查看最新
+                      </button>
+                      <button className="btn" onClick={() => refreshTraceInsights(true)} disabled={!adminOpen}>
+                        刷新建议
+                      </button>
+                    </div>
+                  </div>
+                  {(() => {
+                    const latest = traceInsights?.[0] as any;
+                    const suggs: any[] = Array.isArray(latest?.suggestions) ? latest.suggestions : [];
+                    if (!suggs.length) return null;
+                    return (
+                      <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+                        {suggs.slice(0, 8).map((s, idx) => {
+                          const changes: any[] = Array.isArray(s?.recommend_changes) ? s.recommend_changes : [];
+                          const changesText = changes.map((c) => `${c.key}=${c.value}`).join(", ");
+                          return (
+                            <div key={idx} className="msg" style={{ margin: 0 }}>
+                              <div style={{ fontWeight: 700 }}>{String(s?.title || s?.id || `suggestion_${idx + 1}`)}</div>
+                              {s?.why ? <div className="muted" style={{ marginTop: 4, whiteSpace: "pre-wrap" }}>{String(s.why)}</div> : null}
+                              {changesText ? <div className="muted" style={{ marginTop: 6 }}>建议参数：{changesText}</div> : null}
+                              {s?.notes ? <div className="muted" style={{ marginTop: 6, whiteSpace: "pre-wrap" }}>{String(s.notes)}</div> : null}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
                 </div>
                 <div className="field">
                   <label>Memory Enabled</label>

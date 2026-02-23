@@ -9,8 +9,9 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
-from .config import ai_trace_retention_days, decision_profile_enabled, decision_profile_refresh_hours, proactive_timezone
-from .db import SessionLocal, User, UserDecisionProfile, engine
+from .ai_trace_learning import build_trace_insight, persist_trace_insight
+from .config import ai_trace_enabled, ai_trace_retention_days, decision_profile_enabled, decision_profile_refresh_hours, proactive_timezone
+from .db import AiTraceInsight, SessionLocal, User, UserDecisionProfile, engine
 from .memory import background_refresh_decision_profile
 
 _LOG = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ _START_LOCK = threading.Lock()
 # A fixed advisory lock id to prevent duplicate maintenance runs when multiple processes exist.
 _LOCK_DECISION_PROFILE = 903184221
 _LOCK_AI_TRACE_CLEANUP = 903184222
+_LOCK_AI_TRACE_INSIGHTS = 903184223
 
 # "Idle time" maintenance target (local timezone).
 _RUN_AT_HOUR = 3
@@ -76,6 +78,7 @@ def _maintenance_loop() -> None:
                 time.sleep(sleep_s)
             _run_decision_profile_maintenance()
             _cleanup_ai_traces()
+            _generate_ai_trace_insights()
             # Avoid accidental double-run if system clock jumps.
             time.sleep(2.0)
         except Exception:
@@ -150,6 +153,53 @@ def _cleanup_ai_traces() -> None:
     finally:
         try:
             conn.execute(text("SELECT pg_advisory_unlock(:id)"), {"id": _LOCK_AI_TRACE_CLEANUP})
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _generate_ai_trace_insights() -> None:
+    if not ai_trace_enabled():
+        return
+
+    conn = engine.connect()
+    try:
+        got = conn.execute(text("SELECT pg_try_advisory_lock(:id)"), {"id": _LOCK_AI_TRACE_INSIGHTS}).scalar()
+        if not got:
+            return
+
+        db = SessionLocal()
+        try:
+            # Only generate once per ~day.
+            latest = db.query(AiTraceInsight).order_by(AiTraceInsight.created_at.desc()).limit(1).first()
+            if latest is not None:
+                try:
+                    if (datetime.now(timezone.utc) - latest.created_at) < timedelta(hours=20):
+                        return
+                except Exception:
+                    pass
+
+            insight = build_trace_insight(db, window_days=7, min_traces=30)
+            if not insight:
+                return
+
+            persist_trace_insight(db, insight)
+            db.commit()
+
+            # Keep insights roughly aligned with trace retention window (defense in depth).
+            days = int(ai_trace_retention_days() or 30)
+            days = max(7, min(365, days))
+            threshold = datetime.now(timezone.utc) - timedelta(days=days)
+            db.query(AiTraceInsight).filter(AiTraceInsight.created_at < threshold).delete(synchronize_session=False)
+            db.commit()
+        finally:
+            db.close()
+    finally:
+        try:
+            conn.execute(text("SELECT pg_advisory_unlock(:id)"), {"id": _LOCK_AI_TRACE_INSIGHTS})
         except Exception:
             pass
         try:

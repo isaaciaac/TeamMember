@@ -87,6 +87,24 @@ class AiTraceRun(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
 
 
+class AiTraceInsight(Base):
+    """
+    Level-2 "learning" output derived from ai_trace_runs.
+
+    It must NOT modify knowledge or runtime config automatically. It only provides suggestions.
+    """
+
+    __tablename__ = "ai_trace_insights"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
+    window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
+    trace_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    stats_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    suggestions_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True, nullable=False)
+
+
 class ThreadShare(Base):
     __tablename__ = "thread_shares"
     __table_args__ = (UniqueConstraint("thread_id", "shared_with_user_id", name="uq_thread_share"),)

@@ -12,7 +12,8 @@ from pydantic import BaseModel, Field
 from zoneinfo import ZoneInfo
 
 from .audit import append_audit_log
-from .agents import decompose_tasks, run_subtask
+from .agents import build_role_tasks, run_role_agent
+from .ai_trace_learning import build_trace_insight, persist_trace_insight, serialize_trace_insight
 from .ai_trace import create_ai_trace_run, update_ai_trace_run
 from .ark import ArkClient
 from .auth import create_access_token, get_current_user, hash_password, require_admin, verify_password
@@ -48,6 +49,7 @@ from .config import (
     web_search_top_k,
 )
 from .db import (
+    AiTraceInsight,
     AiTraceRun,
     AppConfig,
     AuditLog,
@@ -1184,142 +1186,120 @@ def chat_stream(thread_id: str, req: ChatRequest, bg: BackgroundTasks, user: Use
 
             return StreamingResponse(gen_once(), media_type="text/event-stream")
 
-        # build context (fast path)
-        try:
-            uctx = get_user_context(user.id, text)
-        except Exception:
-            uctx = {"profile": "", "persona": "", "memory": []}
-        ark = ArkClient()
+        user_message_id = str(getattr(um, "id", "") or "")
 
-        # Optional topic guard: if enabled and the user is not in exception list, block out-of-scope questions early.
-        if topic_guard_enabled() and not bool(getattr(user, "allow_any_topic", False)):
-            allowed_topics = topic_allowed_topics()
-            if allowed_topics:
-                guard = _topic_guard_check(ark, allowed_topics, text)
-                if guard.get("allowed") is False:
-                    reply = str(guard.get("reply") or "").strip() or "这个问题可能超出当前允许的话题范围。请改写为允许范围内的问题，或联系管理员为你开启“话题例外”。"
-                    am = ChatMessage(thread_id=thread_id, user_id=user.id, role="assistant", content=reply)
-                    db.add(am)
-                    # touch thread updated_at
-                    t.updated_at = _utcnow()
-                    db.add(t)
-                    db.commit()
+    finally:
+        db.close()
 
-                    def gen_once():
-                        try:
-                            yield f"data: {json.dumps({'delta': reply}, ensure_ascii=False)}\n\n"
-                        finally:
-                            try:
-                                ark.close()
-                            except Exception:
-                                pass
+    def gen():
+        # Stream-friendly pipeline with meta status events.
+        full: list[str] = []
+        err = ""
+        trace_id_local = ""
+        ark: ArkClient | None = None
 
-                    return StreamingResponse(gen_once(), media_type="text/event-stream")
+        def _evt(obj: dict[str, Any]) -> str:
+            return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
-        try:
-            tstate = get_thread_state(db, thread_id)
-        except Exception:
-            tstate = {"open_issues": [], "entropy": {}}
+        def _meta(status: str, *, mode: str = "normal", stage: str = "") -> str:
+            payload: dict[str, Any] = {"status": status}
+            if mode:
+                payload["mode"] = mode
+            if stage:
+                payload["stage"] = stage
+            return _evt({"meta": payload})
 
-        try:
-            rag_decision = decide_rag(ark, text, thread_state=tstate)
-        except Exception:
-            rag_decision = {
-                "complexity": "complex",
-                "need_clarification": False,
-                "clarify": [],
-                "use_rag": False,
-                "expanded_query": text,
-                "reason": "router_failed",
-            }
-
-        # If the intent expander thinks key info is missing, ask clarifying questions first.
-        need_clarify = bool(rag_decision.get("need_clarification")) and isinstance(rag_decision.get("clarify"), list) and bool(rag_decision.get("clarify"))
-        if need_clarify:
-            qs = [str(x or "").strip() for x in (rag_decision.get("clarify") or [])][:3]
-            qs = [x for x in qs if x]
-            if qs:
-                lines = ["为了更准确地处理这个问题，我需要你补充确认："]
-                for i, q in enumerate(qs, start=1):
-                    lines.append(f"{i}. {q}")
-                reply = "\n".join(lines).strip()
-                am = ChatMessage(thread_id=thread_id, user_id="", role="assistant", content=reply)
-                db.add(am)
-                t.updated_at = _utcnow()
-                db.add(t)
-                db.commit()
-
-                # memory/persona update should still happen, even when we only ask questions
-                bg.add_task(background_extract_memory, user.id, text)
-                bg.add_task(background_refresh_persona, user.id)
-                bg.add_task(background_refresh_thread_state, thread_id)
-
-                def gen_once():
-                    try:
-                        yield f"data: {json.dumps({'delta': reply}, ensure_ascii=False)}\n\n"
-                    finally:
-                        try:
-                            ark.close()
-                        except Exception:
-                            pass
-
-                return StreamingResponse(gen_once(), media_type="text/event-stream")
-
-        rag_hits = []
+        rag_decision: dict[str, Any] = {}
+        tstate: dict[str, Any] = {"open_issues": [], "entropy": {}}
+        rag_hits: list[Any] = []
         web_by_query: dict[str, list[WebSearchResult]] = {}
         agent_results: list[dict[str, Any]] = []
         decompose_tasks_list: list[dict[str, Any]] = []
+        do_decompose = False
+        uctx: dict[str, Any] = {"profile": "", "persona": "", "memory": []}
 
-        do_decompose = bool(rag_decision.get("suggest_decompose")) if isinstance(rag_decision.get("suggest_decompose"), bool) else False
-        if do_decompose:
+        try:
+            yield _meta("意图识别中…", stage="router")
+            ark = ArkClient()
+
             try:
-                decompose_tasks_list = decompose_tasks(
-                    ark, text, max_tasks=agent_max_subtasks(), router_hint=rag_decision, thread_state=tstate
-                )
+                uctx = get_user_context(user.id, text)
             except Exception:
-                decompose_tasks_list = []
-            if not decompose_tasks_list:
-                do_decompose = False
-            else:
-                for task in decompose_tasks_list:
-                    task_rag_hits = []
-                    if bool(task.get("use_rag")):
-                        try:
-                            q = str(task.get("rag_query") or rag_decision.get("expanded_query") or text).strip()
-                            if q:
-                                task_rag_hits = retrieve_knowledge(q)
-                        except Exception:
-                            task_rag_hits = []
+                uctx = {"profile": "", "persona": "", "memory": []}
 
-                    task_web: dict[str, list[WebSearchResult]] = {}
-                    if bool(task.get("use_web")) and bool(web_search_enabled()) and bool(settings.bing_search_api_key):
-                        try:
-                            for q in (task.get("web_queries") or [])[:5]:
-                                qs = str(q or "").strip()
-                                if not qs:
-                                    continue
-                                rs = bing_search(qs, top_k=web_search_top_k())
-                                if rs:
-                                    task_web[qs] = rs
-                                    # aggregate for final prompt
-                                    if qs not in web_by_query:
-                                        web_by_query[qs] = rs
-                        except Exception:
-                            task_web = {}
+            # Optional topic guard (LLM) — keep it streaming-friendly with status.
+            if topic_guard_enabled() and not bool(getattr(user, "allow_any_topic", False)):
+                allowed_topics = topic_allowed_topics()
+                if allowed_topics:
+                    yield _meta("检查话题范围…", stage="guard")
+                    guard = _topic_guard_check(ark, allowed_topics, text)
+                    if guard.get("allowed") is False:
+                        reply = str(guard.get("reply") or "").strip() or "这个问题可能超出当前允许的话题范围。请改写为允许范围内的问题，或联系管理员为你开启“话题例外”。"
+                        full.append(reply)
+                        yield _evt({"delta": reply})
+                        return
 
-                    try:
-                        agent_results.append(run_subtask(ark, original_message=text, task=task, rag_hits=task_rag_hits, web_by_query=task_web))
-                    except Exception:
-                        continue
+            # Thread state (fast read from DB).
+            dbs = SessionLocal()
+            try:
+                tstate = get_thread_state(dbs, thread_id)
+            except Exception:
+                tstate = {"open_issues": [], "entropy": {}}
+            finally:
+                dbs.close()
 
-        if not do_decompose:
-            if rag_decision.get("use_rag"):
+            yield _meta("意图展开/复杂度判断…", stage="router")
+            try:
+                rag_decision = decide_rag(ark, text, thread_state=tstate)
+            except Exception:
+                rag_decision = {
+                    "complexity": "complex",
+                    "need_clarification": False,
+                    "clarify": [],
+                    "use_rag": False,
+                    "expanded_query": text,
+                    "use_web": False,
+                    "web_queries": [],
+                    "suggest_decompose": False,
+                    "reason": "router_failed",
+                }
+
+            # If the intent expander thinks key info is missing, ask clarifying questions first.
+            need_clarify = bool(rag_decision.get("need_clarification")) and isinstance(rag_decision.get("clarify"), list) and bool(rag_decision.get("clarify"))
+            if need_clarify:
+                qs = [str(x or "").strip() for x in (rag_decision.get("clarify") or [])][:3]
+                qs = [x for x in qs if x]
+                if qs:
+                    lines = ["为了更准确地处理这个问题，我需要你补充确认："]
+                    for i, q in enumerate(qs, start=1):
+                        lines.append(f"{i}. {q}")
+                    reply = "\n".join(lines).strip()
+                    full.append(reply)
+                    yield _evt({"delta": reply})
+                    return
+
+            do_decompose = bool(rag_decision.get("suggest_decompose")) if isinstance(rag_decision.get("suggest_decompose"), bool) else False
+            if do_decompose:
+                yield _meta("问题较复杂，已进入深度思考模式（5 角色分析）…", mode="deep", stage="deep")
                 try:
-                    rag_hits = retrieve_knowledge(str(rag_decision.get("expanded_query") or text))
+                    decompose_tasks_list = build_role_tasks(text, max_tasks=agent_max_subtasks(), router_hint=rag_decision)
+                except Exception:
+                    decompose_tasks_list = []
+                if not decompose_tasks_list:
+                    do_decompose = False
+
+            # Tooling (shared for role agents)
+            if bool(rag_decision.get("use_rag")):
+                yield _meta("检索知识库（RAG）…", mode=("deep" if do_decompose else "normal"), stage="tools")
+                try:
+                    q = str(rag_decision.get("expanded_query") or text).strip()
+                    if q:
+                        rag_hits = retrieve_knowledge(q)
                 except Exception:
                     rag_hits = []
 
             if bool(rag_decision.get("use_web")) and bool(web_search_enabled()) and bool(settings.bing_search_api_key):
+                yield _meta("Web Search（摘要）…", mode=("deep" if do_decompose else "normal"), stage="tools")
                 try:
                     for q in (rag_decision.get("web_queries") or [])[:5]:
                         qs = str(q or "").strip()
@@ -1331,94 +1311,126 @@ def chat_stream(thread_id: str, req: ChatRequest, bg: BackgroundTasks, user: Use
                 except Exception:
                     web_by_query = {}
 
-        if ai_trace_enabled():
-            try:
-                trace_web = {
-                    "provider": "bing",
-                    "queries": list(web_by_query.keys()),
-                    "results": {
-                        q: [
-                            {"title": r.title, "snippet": r.snippet, "url": r.url, "display_url": r.display_url}
-                            for r in (rs or [])
-                        ]
-                        for q, rs in (web_by_query or {}).items()
-                    },
-                }
-                trace_decompose = {"enabled": bool(do_decompose), "tasks": decompose_tasks_list if do_decompose else []}
-                trace_row = create_ai_trace_run(
-                    db,
-                    thread_id=thread_id,
-                    actor_user_id=user.id,
-                    user_message_id=um.id,
-                    router=rag_decision,
-                    web_search=trace_web,
-                    decompose=trace_decompose,
-                    subagent=agent_results if do_decompose else [],
-                )
-                db.commit()
-                trace_id = str(trace_row.id)
-            except Exception:
+            if do_decompose and decompose_tasks_list:
+                total = len(decompose_tasks_list)
+                for idx, task in enumerate(decompose_tasks_list, start=1):
+                    title = str(task.get("role_title") or task.get("title") or task.get("role_type") or "").strip() or f"role_{idx}"
+                    yield _meta(f"深度思考 {idx}/{total}：{title}…", mode="deep", stage="subagents")
+                    try:
+                        agent_results.append(
+                            run_role_agent(
+                                ark,
+                                original_message=text,
+                                role_task=task,
+                                rag_hits=(rag_hits if bool(task.get("use_rag")) else []),
+                                web_by_query=(web_by_query if bool(task.get("use_web")) else {}),
+                                prior_results=agent_results,
+                            )
+                        )
+                    except Exception as e:
+                        agent_results.append(
+                            {
+                                "role_type": str(task.get("role_type") or ""),
+                                "role_title": title,
+                                "objective": str(task.get("objective") or "")[:400],
+                                "tools_used": {"rag": bool(task.get("use_rag")), "web": bool(task.get("use_web"))},
+                                "key_findings": [],
+                                "open_questions": [],
+                                "customer_draft": "",
+                                "confidence": 0.0,
+                                "warnings": [f"role_failed: {str(e)[:180]}"],
+                            }
+                        )
+
+            # Persist AI trace (optional)
+            if ai_trace_enabled():
                 try:
-                    db.rollback()
+                    trace_web = {
+                        "provider": "bing",
+                        "queries": list(web_by_query.keys()),
+                        "results": {
+                            q: [
+                                {"title": r.title, "snippet": r.snippet, "url": r.url, "display_url": r.display_url}
+                                for r in (rs or [])
+                            ]
+                            for q, rs in (web_by_query or {}).items()
+                        },
+                    }
+                    trace_decompose = {"enabled": bool(do_decompose), "tasks": decompose_tasks_list if do_decompose else []}
+                    dbt = SessionLocal()
+                    try:
+                        trace_row = create_ai_trace_run(
+                            dbt,
+                            thread_id=thread_id,
+                            actor_user_id=user.id,
+                            user_message_id=user_message_id,
+                            router=rag_decision,
+                            web_search=trace_web,
+                            decompose=trace_decompose,
+                            subagent=agent_results if do_decompose else [],
+                        )
+                        dbt.commit()
+                        trace_id_local = str(trace_row.id)
+                    finally:
+                        dbt.close()
                 except Exception:
-                    pass
-                trace_id = ""
+                    trace_id_local = ""
 
-        current_user_label = _display_user_label(user_id=user.id, phone=(user.phone or ""), email=(user.email or ""), name=user.name)
-        sys_prompt = _build_system_prompt(
-            uctx,
-            rag_hits,
-            allow_any_topic=bool(getattr(user, "allow_any_topic", False)),
-            current_user_label=current_user_label,
-            intent=rag_decision,
-            thread_state=tstate,
-            web_by_query=web_by_query,
-            agent_results=agent_results if do_decompose else None,
-        )
+            yield _meta("生成回答…", mode=("deep" if do_decompose else "normal"), stage="synthesis")
 
-        # include recent chat history (last 30)
-        recent = (
-            db.query(ChatMessage)
-            .filter(ChatMessage.thread_id == thread_id)
-            .order_by(ChatMessage.created_at.asc())
-            .limit(60)
-            .all()
-        )
-        user_ids = {str(r.user_id or "").strip() for r in recent if r.role == "user" and str(r.user_id or "").strip()}
-        user_meta: dict[str, tuple[str, str, str]] = {}
-        if user_ids:
-            rows = db.query(User.id, User.phone, User.email, User.name).filter(User.id.in_(list(user_ids))).all()
-            for uid, phone, email, name in rows:
-                user_meta[str(uid)] = (str(phone or ""), str(email or ""), str(name or ""))
-        messages: list[dict[str, Any]] = [{"role": "system", "content": sys_prompt}]
-        for r in recent:
-            if r.role not in {"user", "assistant", "system"}:
-                continue
-            if r.role == "user":
-                uid = str(r.user_id or "").strip()
-                phone, email, name = user_meta.get(uid, ("", "", ""))
-                speaker = _display_user_label(user_id=uid, phone=phone, email=email, name=name)
-                messages.append({"role": "user", "content": f"[发言人:{speaker}]\n{r.content}"})
-                continue
-            messages.append({"role": r.role, "content": r.content})
+            current_user_label = _display_user_label(user_id=user.id, phone=(user.phone or ""), email=(user.email or ""), name=user.name)
+            sys_prompt = _build_system_prompt(
+                uctx,
+                rag_hits,
+                allow_any_topic=bool(getattr(user, "allow_any_topic", False)),
+                current_user_label=current_user_label,
+                intent=rag_decision,
+                thread_state=tstate,
+                web_by_query=web_by_query,
+                agent_results=agent_results if do_decompose else None,
+            )
 
-    finally:
-        db.close()
+            # include recent chat history (last 60)
+            recent: list[ChatMessage] = []
+            user_meta: dict[str, tuple[str, str, str]] = {}
+            dbm = SessionLocal()
+            try:
+                recent = (
+                    dbm.query(ChatMessage)
+                    .filter(ChatMessage.thread_id == thread_id)
+                    .order_by(ChatMessage.created_at.asc())
+                    .limit(60)
+                    .all()
+                )
+                user_ids = {str(r.user_id or "").strip() for r in recent if r.role == "user" and str(r.user_id or "").strip()}
+                if user_ids:
+                    rows = dbm.query(User.id, User.phone, User.email, User.name).filter(User.id.in_(list(user_ids))).all()
+                    for uid, phone, email, name in rows:
+                        user_meta[str(uid)] = (str(phone or ""), str(email or ""), str(name or ""))
+            finally:
+                dbm.close()
 
-    def gen():
-        # stream from Ark; persist assistant message at the end
-        full: list[str] = []
-        err = ""
-        try:
+            messages: list[dict[str, Any]] = [{"role": "system", "content": sys_prompt}]
+            for r in recent:
+                if r.role not in {"user", "assistant", "system"}:
+                    continue
+                if r.role == "user":
+                    uid = str(r.user_id or "").strip()
+                    phone, email, name = user_meta.get(uid, ("", "", ""))
+                    speaker = _display_user_label(user_id=uid, phone=phone, email=email, name=name)
+                    messages.append({"role": "user", "content": f"[发言人:{speaker}]\n{r.content}"})
+                    continue
+                messages.append({"role": r.role, "content": r.content})
+
             for delta in ark.chat_stream(messages):
                 full.append(delta)
-                yield f"data: {json.dumps({'delta': delta}, ensure_ascii=False)}\n\n"
+                yield _evt({"delta": delta})
         except Exception as e:
             err = str(e)
-            yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+            yield _evt({"error": err})
         finally:
             content = "".join(full).strip()
-            if content or trace_id:
+            if content or trace_id_local:
                 db2 = SessionLocal()
                 try:
                     am_id = ""
@@ -1433,8 +1445,8 @@ def chat_stream(thread_id: str, req: ChatRequest, bg: BackgroundTasks, user: Use
                             th.updated_at = _utcnow()
                             db2.add(th)
 
-                    if trace_id:
-                        tr = db2.get(AiTraceRun, trace_id)
+                    if trace_id_local:
+                        tr = db2.get(AiTraceRun, trace_id_local)
                         if tr:
                             update_ai_trace_run(db2, tr, assistant_message_id=(am_id or None), error=err)
                     db2.commit()
@@ -1447,7 +1459,8 @@ def chat_stream(thread_id: str, req: ChatRequest, bg: BackgroundTasks, user: Use
                 bg.add_task(background_refresh_thread_state, thread_id)
 
             try:
-                ark.close()
+                if ark is not None:
+                    ark.close()
             except Exception:
                 pass
 
@@ -1584,21 +1597,59 @@ def _build_system_prompt(
         for i, it in enumerate(agent_results[:6], start=1):
             if not isinstance(it, dict):
                 continue
-            title = str(it.get("title") or "").strip() or f"子任务{i}"
-            result = str(it.get("result") or "").strip()
+            role_type = str(it.get("role_type") or "").strip()
+            role_title = str(it.get("role_title") or it.get("title") or "").strip()
+            objective = str(it.get("objective") or "").strip()
+
+            title = role_title or (str(it.get("title") or "").strip() if role_type else "") or f"子任务{i}"
             conf = it.get("confidence")
             try:
                 conf_f = float(conf)
             except Exception:
                 conf_f = None
-            lines.append(f"[子任务{i}] {title}" + (f" (confidence={conf_f:.2f})" if conf_f is not None else ""))
-            if result:
-                lines.append(result[:1500])
+
+            head = f"[{i}] {title}"
+            if role_type:
+                head += f" (role={role_type})"
+            if conf_f is not None:
+                head += f" (confidence={conf_f:.2f})"
+            lines.append(head)
+
+            if objective:
+                lines.append("objective: " + objective[:400])
+
+            tools = it.get("tools_used")
+            if isinstance(tools, dict) and tools:
+                try:
+                    rag_on = bool(tools.get("rag"))
+                    web_on = bool(tools.get("web"))
+                    lines.append(f"tools_used: rag={str(rag_on).lower()} web={str(web_on).lower()}")
+                except Exception:
+                    pass
+
+            kf = it.get("key_findings")
+            if isinstance(kf, list) and kf:
+                bullets = [str(x or "").strip() for x in kf if str(x or "").strip()]
+                bullets = bullets[:10]
+                if bullets:
+                    lines.append("key_findings:\n" + "\n".join([f"- {b[:300]}" for b in bullets])[:1800])
+
+            oq = it.get("open_questions")
+            if isinstance(oq, list) and oq:
+                qs = [str(x or "").strip() for x in oq if str(x or "").strip()]
+                qs = qs[:10]
+                if qs:
+                    lines.append("open_questions:\n" + "\n".join([f"- {q[:200]}" for q in qs])[:1200])
+
+            cust = str(it.get("customer_draft") or "").strip()
+            if cust:
+                lines.append("customer_draft:\n" + cust[:2000])
+
             warns = it.get("warnings")
             if isinstance(warns, list) and warns:
-                w = [str(x or '').strip() for x in warns if str(x or '').strip()]
+                w = [str(x or "").strip() for x in warns if str(x or "").strip()]
                 if w:
-                    lines.append("warnings: " + " | ".join(w[:6])[:500])
+                    lines.append("warnings: " + " | ".join(w[:10])[:800])
             lines.append("")
         agent_ctx = "\n".join(lines).strip()
 
@@ -2295,6 +2346,34 @@ def admin_set_config(req: AdminSetConfigRequest, request: Request, admin: User =
 
     invalidate_cache()
     return {"ok": True}
+
+
+@router.get("/admin/ai_trace/insights")
+def admin_list_ai_trace_insights(
+    limit: int = 30,
+    refresh: bool = False,
+    admin: User = Depends(require_admin),
+) -> list[dict[str, Any]]:
+    _ = admin
+    lim = max(1, min(120, int(limit or 30)))
+    db = SessionLocal()
+    try:
+        if refresh:
+            try:
+                insight = build_trace_insight(db, window_days=7, min_traces=30)
+                if insight:
+                    persist_trace_insight(db, insight)
+                    db.commit()
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+
+        rows = db.query(AiTraceInsight).order_by(AiTraceInsight.created_at.desc()).limit(lim).all()
+        return [serialize_trace_insight(r) for r in rows]
+    finally:
+        db.close()
 
 
 @router.get("/admin/audit")

@@ -1,4 +1,7 @@
+
 flowchart TD
+  %% TeamMember Architecture (updated: deep thinking 5 roles + SSE meta + trace learning)
+
   %% =======================
   %% Frontend
   %% =======================
@@ -16,11 +19,11 @@ flowchart TD
 
     auth[Auth/JWT]
     threadAPI[Threads & Shares API]
-    chatAPI[POST /threads/:id/chat_stream（SSE）]
+    chatAPI[POST /threads/:id/chat_stream（SSE: delta + meta）]
     msgAPI[GET /threads/:id/messages]
     traceAPI[GET /threads/:id/messages/:mid/trace]
 
-    adminAPI[Admin API（用户/配置/审核/审计）]
+    adminAPI[Admin API（用户/配置/审核/审计/Trace Insights）]
     ingestAPI[Knowledge Ingest & Teaching API]
     visionAPI[POST /vision/describe]
 
@@ -29,12 +32,14 @@ flowchart TD
     tstate[Thread State（open loops / entropy）]
 
     router[Intent Router（decide_rag）]
-    decomp[Task Decomposer（<=5）]
-    workers[Sub-agent Workers（<=5）]
+    deep[Deep Thinking Orchestrator（固定 5 角色）]
+    roles[Role Agents（发散/证据/质疑/收敛/沟通稿）]
 
     ragTool[RAG Retriever（Qdrant）]
     webTool[Web Search Tool（Bing 摘要）]
     synth[Final Answer Generator（Ark stream）]
+
+    traceLearn[AI Trace Learning（Level 2，仅建议）]
 
     bg[Background Tasks（memory/persona/thread_state）]
     maint[Maintenance Thread（03:15 daily）]
@@ -49,6 +54,7 @@ flowchart TD
     appcfg[(app_config 运行时覆盖)]
     audit[(audit_logs 只增不改 + hash chain)]
     traceTbl[(ai_trace_runs（30天保留）)]
+    insightTbl[(ai_trace_insights（建议，不自动生效）)]
     qdr[(Qdrant：tm_knowledge / tm_user_memory)]
   end
 
@@ -94,7 +100,7 @@ flowchart TD
   threadAPI --> pg
 
   %% =======================
-  %% Chat pipeline
+  %% Chat pipeline (SSE)
   %% =======================
   chatAPI -->|写入 user chat_message + 更新 thread.updated_at| pg
   chatAPI -->|读取 thread_state| tstate
@@ -112,7 +118,7 @@ flowchart TD
   %% =======================
   router -->|use_rag| ragTool
   router -->|use_web + enabled + 有 Bing Key| webTool
-  router -->|suggest_decompose| decomp
+  router -->|complex -> deep thinking| deep --> roles
 
   %% =======================
   %% RAG (Qdrant)
@@ -121,6 +127,7 @@ flowchart TD
   ragTool -->|vector search| qdr
   ragTool -->|optional rerank（doc>=threshold）| ark
   ark -->|rerank order| ragTool
+  ragTool -->|hits| roles
   ragTool -->|hits| synth
 
   %% =======================
@@ -128,33 +135,29 @@ flowchart TD
   %% =======================
   webTool -->|queries| bing
   bing -->|title/snippet/url| webTool
+  webTool -->|summaries| roles
   webTool -->|summaries| synth
-  webTool -->|summaries（子任务可用）| workers
 
   %% =======================
-  %% Decompose + subagents
+  %% Deep thinking (fixed roles)
   %% =======================
-  decomp -->|LLM tasks JSON| ark
-  decomp --> workers
-  workers -->|可选 RAG/Web| ragTool
-  workers -->|可选 RAG/Web| webTool
-  workers -->|LLM worker JSON| ark
-  workers --> synth
+  roles -->|role JSON outputs| ark
+  roles --> synth
 
   %% =======================
   %% Trace (transparency/debug)
   %% =======================
-  chatAPI -->|创建 trace（router/web/decompose/subagent）| traceTbl
+  chatAPI -->|创建 trace（router/web/deep/roles）| traceTbl
   synth -->|写入 assistant chat_message| pg
   synth -->|更新 trace（assistant_message_id/error）| traceTbl
-  traceTbl --> pg
   traceAPI --> traceTbl
   msgAPI --> pg
 
   %% =======================
   %% Stream back to UI
   %% =======================
-  synth -->|SSE delta 流式输出| ui
+  chatAPI -->|SSE meta：状态/阶段/深度模式| ui
+  synth -->|SSE delta：文本流式输出| ui
 
   %% =======================
   %% Background tasks
@@ -178,13 +181,15 @@ flowchart TD
   adminAPI -->|审批 Teaching -> 写入 teaching seeds| qdr
 
   %% =======================
-  %% Admin config + audit
+  %% Admin config + audit + insights
   %% =======================
   adminAPI --> appcfg --> pg
   adminAPI -->|审计（只增不改）| audit --> pg
+  adminAPI -->|生成/查看 Trace Insights| insightTbl --> pg
 
   %% =======================
   %% Maintenance
   %% =======================
   maint -->|刷新 Decision Profile（>=5天）| ark --> pg
   maint -->|清理过期 trace（>30天）| traceTbl
+  maint -->|生成 Trace Insights（每天一次）| traceLearn --> insightTbl
