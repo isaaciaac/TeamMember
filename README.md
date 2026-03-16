@@ -230,3 +230,7 @@ flowchart LR
   API --> Qdrant
   API -. optional .-> Notify
 ```
+
+## License
+
+Apache License 2.0. See `LICENSE`.
